@@ -428,20 +428,69 @@ INDEX_HTML = r"""<!doctype html>
       background: #fff;
     }
     .editor-toolbar {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
       gap: 8px;
       padding: 10px;
       background: #f8fafc;
       border-bottom: 1px solid var(--line);
     }
+    .toolbar-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      padding-right: 8px;
+      margin-right: 2px;
+      border-right: 1px solid #dbe2ea;
+    }
+    .toolbar-group:last-child {
+      border-right: 0;
+      padding-right: 0;
+    }
+    .toolbar-select {
+      min-height: 34px;
+      min-width: 120px;
+      padding: 0 10px;
+      border-radius: 5px;
+      border: 1px solid #c6ced8;
+      background: #fff;
+      font: inherit;
+      font-size: 13px;
+      color: var(--ink);
+    }
     .tool-btn {
       min-height: 34px;
-      padding: 0 12px;
+      min-width: 34px;
+      padding: 0 10px;
       border-radius: 5px;
       font-size: 13px;
       border: 1px solid #c6ced8;
       background: #fff;
+    }
+    .tool-btn.active-tool {
+      border-color: var(--blue);
+      color: var(--blue);
+      background: #eef5ff;
+    }
+    .tool-icon {
+      font-size: 15px;
+      line-height: 1;
+    }
+    .color-input {
+      width: 34px;
+      min-width: 34px;
+      height: 34px;
+      padding: 3px;
+      border: 1px solid #c6ced8;
+      border-radius: 5px;
+      background: #fff;
+      cursor: pointer;
     }
     .html-editor {
       min-height: 180px;
@@ -449,6 +498,40 @@ INDEX_HTML = r"""<!doctype html>
       outline: none;
       line-height: 1.5;
       font-size: 14px;
+    }
+    .html-editor blockquote {
+      margin: 10px 0;
+      padding-left: 12px;
+      border-left: 3px solid #c6ced8;
+      color: #475467;
+    }
+    .html-editor pre {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #0f1720;
+      color: #d6e2ef;
+      white-space: pre-wrap;
+    }
+    .html-source {
+      min-height: 180px;
+      border: 0;
+      border-top: 1px solid var(--line);
+      border-radius: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      background: #fbfcfe;
+    }
+    .editor-shell.fullscreen {
+      position: fixed;
+      inset: 24px;
+      z-index: 20;
+      box-shadow: 0 20px 40px rgba(15, 23, 32, .28);
+    }
+    .editor-shell.fullscreen .html-editor,
+    .editor-shell.fullscreen .html-source {
+      min-height: calc(100vh - 190px);
     }
     .html-editor:empty:before {
       content: "Digite aqui a mensagem da mala direta.";
@@ -551,18 +634,55 @@ INDEX_HTML = r"""<!doctype html>
               Corpo em HTML
               <div class="editor-shell">
                 <div class="editor-toolbar">
-                  <button type="button" class="tool-btn" data-command="bold"><strong>B</strong></button>
-                  <button type="button" class="tool-btn" data-command="italic"><em>I</em></button>
-                  <button type="button" class="tool-btn" data-command="underline"><u>U</u></button>
-                  <button type="button" class="tool-btn" data-command="insertUnorderedList">Lista</button>
-                  <button type="button" class="tool-btn" data-command="createLink">Link</button>
-                  <button type="button" class="tool-btn" data-command="removeFormat">Limpar</button>
+                  <div class="toolbar-row">
+                    <div class="toolbar-group">
+                      <select class="toolbar-select" id="formatBlockSelect">
+                        <option value="P">Simples</option>
+                        <option value="H1">Título grande</option>
+                        <option value="H2">Título médio</option>
+                        <option value="H3">Título pequeno</option>
+                        <option value="BLOCKQUOTE">Citação</option>
+                        <option value="PRE">Código</option>
+                      </select>
+                    </div>
+                    <div class="toolbar-group">
+                      <button type="button" class="tool-btn" data-command="bold" title="Negrito"><strong>B</strong></button>
+                      <button type="button" class="tool-btn" data-command="italic" title="Itálico"><em>I</em></button>
+                      <button type="button" class="tool-btn" data-command="underline" title="Sublinhado"><u>U</u></button>
+                    </div>
+                    <div class="toolbar-group">
+                      <input type="color" id="textColorInput" class="color-input" value="#1d2733" title="Cor do texto">
+                      <input type="color" id="highlightColorInput" class="color-input" value="#fff2a8" title="Destaque">
+                    </div>
+                    <div class="toolbar-group">
+                      <button type="button" class="tool-btn" data-command="insertUnorderedList" title="Lista com marcadores"><span class="tool-icon">•</span></button>
+                      <button type="button" class="tool-btn" data-command="insertOrderedList" title="Lista numerada"><span class="tool-icon">1.</span></button>
+                    </div>
+                  </div>
+                  <div class="toolbar-row">
+                    <div class="toolbar-group">
+                      <button type="button" class="tool-btn" data-command="justifyLeft" title="Alinhar à esquerda"><span class="tool-icon">≡</span></button>
+                      <button type="button" class="tool-btn" data-command="justifyCenter" title="Centralizar"><span class="tool-icon">≣</span></button>
+                      <button type="button" class="tool-btn" data-command="justifyRight" title="Alinhar à direita"><span class="tool-icon">☰</span></button>
+                    </div>
+                    <div class="toolbar-group">
+                      <button type="button" class="tool-btn" data-command="createLink" title="Inserir link"><span class="tool-icon">🔗</span></button>
+                      <button type="button" class="tool-btn" data-command="unlink" title="Remover link"><span class="tool-icon">⛓</span></button>
+                      <button type="button" class="tool-btn" data-command="insertImage" title="Inserir imagem"><span class="tool-icon">🖼</span></button>
+                    </div>
+                    <div class="toolbar-group">
+                      <button type="button" class="tool-btn" data-command="viewSource" title="Ver HTML"><span class="tool-icon">&lt;/&gt;</span></button>
+                      <button type="button" class="tool-btn" data-command="toggleFullscreen" title="Expandir editor"><span class="tool-icon">⛶</span></button>
+                      <button type="button" class="tool-btn" data-command="removeFormat" title="Limpar formatação">Limpar</button>
+                    </div>
+                  </div>
                 </div>
                 <div id="htmlBodyEditor" class="html-editor" contenteditable="true">Olá {{nome}},<br><br>Digite aqui a mensagem da mala direta.</div>
+                <textarea id="htmlSourceEditor" class="html-source hidden" spellcheck="false"></textarea>
               </div>
             </label>
             <textarea name="body_html" id="htmlBodyValue" class="hidden"></textarea>
-            <div class="hint">Use a barra para aplicar negrito, itálico, sublinhado, lista e link. As variáveis como {{nome}} continuam funcionando.</div>
+            <div class="hint">Use a barra para aplicar estilos, alinhamento, cores, links, imagens e alternar entre visualização visual e HTML. As variáveis como {{nome}} continuam funcionando.</div>
           </div>
         </div>
 
@@ -626,9 +746,10 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="log" id="logBox">Aguardando envio...</div>
       <div>
-        <p class="panel-title">Histórico recente</p>
+        <p class="panel-title">Campanhas em andamento</p>
         <div class="hint" id="suppressionInfo">Lista de supressão: 0 contato(s).</div>
         <div class="preview" id="activeCampaignsBox">Nenhuma campanha em andamento.</div>
+        <p class="panel-title" style="margin-top:14px;">Histórico recente</p>
         <div class="preview" id="historyBox">Nenhuma campanha registrada ainda.</div>
       </div>
     </aside>
@@ -655,8 +776,14 @@ INDEX_HTML = r"""<!doctype html>
     const plainEditorBox = document.querySelector("#plainEditorBox");
     const htmlEditorBox = document.querySelector("#htmlEditorBox");
     const plainBody = document.querySelector("#plainBody");
+    const editorShell = document.querySelector(".editor-shell");
     const htmlBodyEditor = document.querySelector("#htmlBodyEditor");
+    const htmlSourceEditor = document.querySelector("#htmlSourceEditor");
     const htmlBodyValue = document.querySelector("#htmlBodyValue");
+    const formatBlockSelect = document.querySelector("#formatBlockSelect");
+    const textColorInput = document.querySelector("#textColorInput");
+    const highlightColorInput = document.querySelector("#highlightColorInput");
+    let sourceMode = false;
     let pollTimer = null;
 
     document.querySelectorAll(".tab").forEach((tab) => {
@@ -676,7 +803,11 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function syncBodyFields() {
-      htmlBodyValue.value = htmlBodyEditor.innerHTML.trim();
+      if (sourceMode) {
+        htmlBodyValue.value = htmlSourceEditor.value.trim();
+      } else {
+        htmlBodyValue.value = htmlBodyEditor.innerHTML.trim();
+      }
     }
 
     function encodeHtml(text) {
@@ -704,19 +835,60 @@ INDEX_HTML = r"""<!doctype html>
       syncBodyFields();
     }
 
+    function setSourceMode(enabled) {
+      sourceMode = enabled;
+      if (enabled) {
+        htmlSourceEditor.value = htmlBodyEditor.innerHTML.trim();
+      } else {
+        htmlBodyEditor.innerHTML = htmlSourceEditor.value.trim() || "Olá {{nome}},<br><br>Digite aqui a mensagem da mala direta.";
+      }
+      htmlBodyEditor.classList.toggle("hidden", enabled);
+      htmlSourceEditor.classList.toggle("hidden", !enabled);
+      document.querySelectorAll('.tool-btn[data-command="viewSource"]').forEach((button) => {
+        button.classList.toggle("active-tool", enabled);
+      });
+      syncBodyFields();
+    }
+
+    function applyEditorCommand(command, value = null) {
+      if (sourceMode && command !== "viewSource" && command !== "toggleFullscreen") {
+        setSourceMode(false);
+      }
+      htmlBodyEditor.focus();
+      document.execCommand(command, false, value);
+      syncBodyFields();
+    }
+
     isHtmlToggle.addEventListener("change", toggleEditorMode);
     htmlBodyEditor.addEventListener("input", syncBodyFields);
+    htmlSourceEditor.addEventListener("input", syncBodyFields);
+    formatBlockSelect.addEventListener("change", () => applyEditorCommand("formatBlock", formatBlockSelect.value));
+    textColorInput.addEventListener("input", () => applyEditorCommand("foreColor", textColorInput.value));
+    highlightColorInput.addEventListener("input", () => applyEditorCommand("hiliteColor", highlightColorInput.value));
 
     document.querySelectorAll(".tool-btn").forEach((button) => {
+      button.addEventListener("mousedown", (event) => event.preventDefault());
       button.addEventListener("click", () => {
-        htmlBodyEditor.focus();
         if (button.dataset.command === "createLink") {
           const link = window.prompt("Informe a URL do link:");
-          if (link) document.execCommand("createLink", false, link);
-        } else {
-          document.execCommand(button.dataset.command, false, null);
+          if (link) applyEditorCommand("createLink", link);
+          return;
         }
-        syncBodyFields();
+        if (button.dataset.command === "insertImage") {
+          const imageUrl = window.prompt("Informe a URL da imagem:");
+          if (imageUrl) applyEditorCommand("insertImage", imageUrl);
+          return;
+        }
+        if (button.dataset.command === "viewSource") {
+          setSourceMode(!sourceMode);
+          return;
+        }
+        if (button.dataset.command === "toggleFullscreen") {
+          editorShell.classList.toggle("fullscreen");
+          button.classList.toggle("active-tool", editorShell.classList.contains("fullscreen"));
+          return;
+        }
+        applyEditorCommand(button.dataset.command);
       });
     });
 
@@ -1055,6 +1227,11 @@ def load_history() -> list[dict[str, Any]]:
 
 def load_active_campaigns() -> list[dict[str, Any]]:
     return [item for item in load_history() if item.get("status") in {"running", "paused", "scheduled"}]
+
+
+def load_first_active_campaign() -> dict[str, Any] | None:
+    items = load_active_campaigns()
+    return items[0] if items else None
 
 
 def load_suppression_list() -> dict[str, dict[str, str]]:
@@ -1735,27 +1912,50 @@ def run_job(
 def job_snapshot() -> dict[str, Any]:
     with JOB_LOCK:
         job = CURRENT_JOB
-        if not job:
-            return {"id": None, "status": "idle", "logs": [], "suppression_count": suppression_count()}
-        next_send_in = 0
-        if job.next_send_at:
-            next_send_in = max(0, int(job.next_send_at - time.time()))
+        if job and job.status in {"running", "paused", "scheduled"}:
+            next_send_in = 0
+            if job.next_send_at:
+                next_send_in = max(0, int(job.next_send_at - time.time()))
+            return {
+                "id": job.id,
+                "sender": job.sender,
+                "subject": job.subject,
+                "status": job.status,
+                "total": job.total,
+                "sent": job.sent,
+                "failed": job.failed,
+                "skipped": job.skipped,
+                "current": job.current,
+                "next_send_in": next_send_in,
+                "scheduled_for_text": format_timestamp(job.scheduled_for),
+                "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+                "suppression_count": suppression_count(),
+                "logs": list(job.logs),
+            }
+    active_item = load_first_active_campaign()
+    if active_item:
         return {
-            "id": job.id,
-            "sender": job.sender,
-            "subject": job.subject,
-            "status": job.status,
-            "total": job.total,
-            "sent": job.sent,
-            "failed": job.failed,
-            "skipped": job.skipped,
-            "current": job.current,
-            "next_send_in": next_send_in,
-            "scheduled_for_text": format_timestamp(job.scheduled_for),
-            "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+            "id": active_item["id"],
+            "sender": active_item["sender"],
+            "subject": active_item["subject"],
+            "status": active_item["status"],
+            "total": active_item["total"],
+            "sent": active_item["sent"],
+            "failed": active_item["failed"],
+            "skipped": active_item["skipped"],
+            "current": "",
+            "next_send_in": 0,
+            "scheduled_for_text": active_item["scheduled_for_text"],
+            "report_url": active_item["report_url"],
             "suppression_count": suppression_count(),
-            "logs": list(job.logs),
+            "logs": [
+                {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "message": "Existe uma campanha persistida bloqueando novos envios. Use Cancelar para liberar a fila.",
+                }
+            ],
         }
+    return {"id": None, "status": "idle", "logs": [], "suppression_count": suppression_count()}
 
 
 class MailerHandler(BaseHTTPRequestHandler):
