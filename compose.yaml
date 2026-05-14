@@ -1,0 +1,11 @@
+services:
+  mala-direta:
+    build:
+      context: .
+    container_name: mala-direta-tceal
+    ports:
+      - "8080:8080"
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+    restart: unless-stopped
