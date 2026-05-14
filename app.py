@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 SMTP_SERVER = "smtp.tceal.tc.br"
@@ -34,6 +35,7 @@ SMTP_PORT = 587
 EMAIL_DOMAIN = "@tceal.tc.br"
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8086"))
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Maceio")
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 REPORTS_DIR = DATA_DIR / "reports"
@@ -54,6 +56,11 @@ MICROSOFT_DOMAINS = {
 
 DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
+
+try:
+    APP_TZ = ZoneInfo(APP_TIMEZONE)
+except ZoneInfoNotFoundError:
+    APP_TZ = ZoneInfo("UTC")
 
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
@@ -1037,13 +1044,13 @@ INDEX_HTML = INDEX_HTML.replace("__BRAND_IMAGE_URL__", BRAND_IMAGE_URL)
 
 
 def now_text() -> str:
-    return time.strftime("%H:%M:%S")
+    return datetime.now(APP_TZ).strftime("%H:%M:%S")
 
 
 def format_timestamp(timestamp: float | None) -> str:
     if not timestamp:
         return ""
-    return datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M")
+    return datetime.fromtimestamp(timestamp, APP_TZ).strftime("%d/%m/%Y %H:%M")
 
 
 def read_json_file(path: Path, default: Any) -> Any:
@@ -1575,7 +1582,8 @@ def parse_schedule(value: str) -> float | None:
     if not raw_value:
         return None
     try:
-        return datetime.strptime(raw_value, "%Y-%m-%dT%H:%M").timestamp()
+        local_dt = datetime.strptime(raw_value, "%Y-%m-%dT%H:%M").replace(tzinfo=APP_TZ)
+        return local_dt.timestamp()
     except ValueError as exc:
         raise ValueError("A data de agendamento está inválida.") from exc
 
@@ -1950,7 +1958,7 @@ def job_snapshot() -> dict[str, Any]:
             "suppression_count": suppression_count(),
             "logs": [
                 {
-                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "time": datetime.now(APP_TZ).strftime("%H:%M:%S"),
                     "message": "Existe uma campanha persistida bloqueando novos envios. Use Cancelar para liberar a fila.",
                 }
             ],
