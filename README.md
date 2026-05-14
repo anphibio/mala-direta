@@ -61,6 +61,7 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 - Pausar, retomar e cancelar campanha em andamento.
 - Agendamento de campanha para data e hora futura.
 - Histórico local das campanhas com relatório CSV por envio.
+- Retry assistido apenas com os e-mails que falharam no envio, com edição manual antes do reenvio.
 - Lista de supressão para falhas permanentes.
 - Monitoramento de retornos por IMAP após o envio, para detectar bounces no Zimbra.
 - Banco SQLite local em `data/mala_direta.db` para persistir histórico e supressões.

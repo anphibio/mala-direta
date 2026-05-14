@@ -790,6 +790,7 @@ INDEX_HTML = r"""<!doctype html>
     const plainEditorBox = document.querySelector("#plainEditorBox");
     const htmlEditorBox = document.querySelector("#htmlEditorBox");
     const plainBody = document.querySelector("#plainBody");
+    const manualEmails = document.querySelector('textarea[name="manual_emails"]');
     const editorShell = document.querySelector(".editor-shell");
     const htmlBodyEditor = document.querySelector("#htmlBodyEditor");
     const htmlSourceEditor = document.querySelector("#htmlSourceEditor");
@@ -802,12 +803,18 @@ INDEX_HTML = r"""<!doctype html>
 
     document.querySelectorAll(".tab").forEach((tab) => {
       tab.addEventListener("click", () => {
-        document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
-        document.querySelectorAll(".sourceBox").forEach((box) => box.classList.add("hidden"));
-        tab.classList.add("active");
-        document.querySelector("#" + tab.dataset.target).classList.remove("hidden");
+        activateSourceTab(tab.dataset.target);
       });
     });
+
+    function activateSourceTab(targetId) {
+      document.querySelectorAll(".tab").forEach((item) => {
+        item.classList.toggle("active", item.dataset.target === targetId);
+      });
+      document.querySelectorAll(".sourceBox").forEach((box) => {
+        box.classList.toggle("hidden", box.id !== targetId);
+      });
+    }
 
     function formDataWithSource() {
       syncBodyFields();
@@ -977,7 +984,8 @@ INDEX_HTML = r"""<!doctype html>
           ? payload.items.map((item) => {
               const when = item.scheduled_for_text || item.created_at_text || "";
               const footer = item.report_url ? `<a href="${item.report_url}" target="_blank">Relatório</a>` : "";
-              return `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.status)} | ${item.sent}/${item.total} enviados | ${escapeHtml(when)} ${footer}</div>`;
+              const retryBtn = item.failed > 0 ? `<button type="button" class="tool-btn retry-failed-btn" data-id="${escapeHtml(item.id)}" data-subject="${escapeHtml(item.subject)}">Retry falhas</button>` : "";
+              return `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.status)} | ${item.sent}/${item.total} enviados | ${escapeHtml(when)}<br>${footer} ${retryBtn}</div>`;
             }).join("")
           : "Nenhuma campanha registrada ainda.";
         document.querySelectorAll(".active-cancel-btn").forEach((button) => {
@@ -987,6 +995,28 @@ INDEX_HTML = r"""<!doctype html>
               await fetch(`/api/cancel?id=${encodeURIComponent(button.dataset.id)}`, { method: "POST" });
               updateStatus();
             } catch (error) {
+              button.disabled = false;
+            }
+          });
+        });
+        document.querySelectorAll(".retry-failed-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const response = await fetch(`/api/retry-source?id=${encodeURIComponent(button.dataset.id)}`);
+              const payload = await response.json();
+              if (!response.ok) throw new Error(payload.error || "Não foi possível preparar o retry.");
+              activateSourceTab("manualBox");
+              manualEmails.value = (payload.recipients || []).join("\n");
+              previewBox.innerHTML = `<strong>${payload.recipients.length}</strong> e-mails com falha carregados para retry. Você pode editar os endereços antes de reenviar.`;
+              statusBox.className = "status";
+              statusBox.textContent = `Retry preparado com base na campanha "${button.dataset.subject || "anterior"}".`;
+              manualEmails.focus();
+              manualEmails.scrollIntoView({ behavior: "smooth", block: "center" });
+            } catch (error) {
+              statusBox.className = "status error";
+              statusBox.textContent = error.message;
+            } finally {
               button.disabled = false;
             }
           });
@@ -1358,6 +1388,28 @@ def save_report(job: MailJob) -> None:
         writer.writeheader()
         writer.writerows(job.report_rows)
     job.report_path = report_path.name
+
+
+def load_failed_recipients_from_report(campaign_id: str) -> list[str]:
+    if not campaign_id:
+        return []
+    report_path = REPORTS_DIR / f"{campaign_id}.csv"
+    if not report_path.exists():
+        return []
+    failed: list[str] = []
+    seen: set[str] = set()
+    with report_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            status = str(row.get("status", "")).strip().lower()
+            email_address = str(row.get("email", "")).strip().lower()
+            if status != "failed":
+                continue
+            if not email_address or email_address in seen:
+                continue
+            seen.add(email_address)
+            failed.append(email_address)
+    return failed
 
 
 def campaign_summary(job: MailJob) -> dict[str, Any]:
@@ -2181,6 +2233,17 @@ class MailerHandler(BaseHTTPRequestHandler):
                 "text/csv; charset=utf-8",
                 headers={"Content-Disposition": f'attachment; filename=\"relatorio-{report_id}.csv\"'},
             )
+            return
+        if parsed.path == "/api/retry-source":
+            campaign_id = parse_qs(parsed.query).get("id", [""])[0]
+            recipients = load_failed_recipients_from_report(campaign_id)
+            if not campaign_id:
+                self.send_json({"error": "Informe a campanha para preparar o retry."}, HTTPStatus.BAD_REQUEST)
+                return
+            if not recipients:
+                self.send_json({"error": "Essa campanha não tem e-mails com falha para retry."}, HTTPStatus.NOT_FOUND)
+                return
+            self.send_json({"campaign_id": campaign_id, "recipients": recipients})
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
