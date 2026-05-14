@@ -8,18 +8,25 @@ import os
 import random
 import re
 import smtplib
+import sqlite3
 import ssl
 import threading
 import time
 import uuid
+import base64
+import hashlib
+import hmac
+import secrets
 from dataclasses import dataclass, field
+from datetime import datetime
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from string import Template
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 
 SMTP_SERVER = "smtp.tceal.tc.br"
@@ -27,9 +34,30 @@ SMTP_PORT = 587
 EMAIL_DOMAIN = "@tceal.tc.br"
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8086"))
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+REPORTS_DIR = DATA_DIR / "reports"
+DB_PATH = DATA_DIR / "mala_direta.db"
+KEY_PATH = DATA_DIR / "app.key"
+LEGACY_HISTORY_FILE = DATA_DIR / "campaign_history.json"
+LEGACY_SUPPRESSION_FILE = DATA_DIR / "suppression_list.json"
+MICROSOFT_DOMAINS = {
+    "hotmail.com",
+    "hotmail.com.br",
+    "outlook.com",
+    "outlook.com.br",
+    "live.com",
+    "msn.com",
+    "office365.com",
+    "onmicrosoft.com",
+}
+
+DATA_DIR.mkdir(exist_ok=True)
+REPORTS_DIR.mkdir(exist_ok=True)
 
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
+BRAND_IMAGE_URL = "https://www.tceal.tc.br/view/img/logo_main.png"
 
 
 @dataclass
@@ -65,13 +93,17 @@ class MailJob:
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     next_send_at: float | None = None
+    scheduled_for: float | None = None
+    report_path: str | None = None
     logs: list[dict[str, Any]] = field(default_factory=list)
+    report_rows: list[dict[str, str]] = field(default_factory=list)
     pause_event: threading.Event = field(default_factory=threading.Event)
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 JOB_LOCK = threading.Lock()
 CURRENT_JOB: MailJob | None = None
+DB_LOCK = threading.Lock()
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -100,15 +132,18 @@ INDEX_HTML = r"""<!doctype html>
     body {
       margin: 0;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at top left, rgba(32, 84, 147, .10), transparent 28%),
+        linear-gradient(180deg, #fbfcfe 0%, #f3f6fa 100%);
       color: var(--ink);
     }
     header {
-      background: #ffffff;
+      background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.92));
       border-bottom: 1px solid var(--line);
       position: sticky;
       top: 0;
       z-index: 5;
+      backdrop-filter: blur(8px);
     }
     .bar {
       max-width: 1220px;
@@ -118,6 +153,22 @@ INDEX_HTML = r"""<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+    .brand img {
+      width: 240px;
+      max-width: min(42vw, 240px);
+      height: auto;
+      display: block;
+      flex: 0 0 auto;
+    }
+    .brand-copy {
+      min-width: 0;
     }
     h1 {
       font-size: 22px;
@@ -144,11 +195,24 @@ INDEX_HTML = r"""<!doctype html>
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    section:before, aside:before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(135deg, rgba(32, 84, 147, .05), transparent 42%),
+        linear-gradient(315deg, rgba(159, 45, 32, .05), transparent 36%);
+      pointer-events: none;
     }
     .form {
       padding: 22px;
       display: grid;
       gap: 18px;
+      position: relative;
+      z-index: 1;
     }
     .panel-title {
       margin: 0 0 12px;
@@ -286,6 +350,7 @@ INDEX_HTML = r"""<!doctype html>
       padding: 18px;
       display: grid;
       gap: 16px;
+      background-image: linear-gradient(180deg, rgba(255,255,255,.98), rgba(248,250,252,.98));
     }
     .stats {
       display: grid;
@@ -393,6 +458,8 @@ INDEX_HTML = r"""<!doctype html>
       main { grid-template-columns: 1fr; padding: 14px; }
       aside { position: static; }
       .bar { align-items: flex-start; flex-direction: column; padding: 15px; }
+      .brand { flex-direction: column; align-items: flex-start; }
+      .brand img { max-width: min(72vw, 240px); }
       .server { white-space: normal; }
       .grid { grid-template-columns: 1fr; }
       .form { padding: 16px; }
@@ -402,9 +469,12 @@ INDEX_HTML = r"""<!doctype html>
 <body>
   <header>
     <div class="bar">
-      <div>
+      <div class="brand">
+        <img src="__BRAND_IMAGE_URL__" alt="TCE-AL">
+        <div class="brand-copy">
         <h1>Mala Direta TCE/AL</h1>
         <div class="hint">Envio autenticado com controles de ritmo, fila e personalização por CSV.</div>
+        </div>
       </div>
       <div class="server">SMTP: smtp.tceal.tc.br:587 STARTTLS</div>
     </div>
@@ -523,8 +593,12 @@ INDEX_HTML = r"""<!doctype html>
               Responder para
               <input type="email" name="reply_to" placeholder="opcional@tceal.tc.br">
             </label>
+            <label>
+              Agendar para
+              <input type="datetime-local" name="schedule_at">
+            </label>
           </div>
-          <div class="hint">Use valores conservadores para contas Microsoft. O sistema aplica delay aleatório, pausa por lote e teto por hora ao mesmo tempo.</div>
+          <div class="hint">Use valores conservadores para contas Microsoft. O sistema aplica delay aleatório, pausa por lote, teto por hora e espaçamento extra automático para domínios Microsoft.</div>
         </div>
 
         <div class="actions">
@@ -548,8 +622,15 @@ INDEX_HTML = r"""<!doctype html>
         <button type="button" id="pauseBtn" disabled>Pausar</button>
         <button type="button" id="resumeBtn" disabled>Retomar</button>
         <button type="button" class="danger" id="cancelBtn" disabled>Cancelar</button>
+        <button type="button" id="reportBtn" disabled>Baixar relatório</button>
       </div>
       <div class="log" id="logBox">Aguardando envio...</div>
+      <div>
+        <p class="panel-title">Histórico recente</p>
+        <div class="hint" id="suppressionInfo">Lista de supressão: 0 contato(s).</div>
+        <div class="preview" id="activeCampaignsBox">Nenhuma campanha em andamento.</div>
+        <div class="preview" id="historyBox">Nenhuma campanha registrada ainda.</div>
+      </div>
     </aside>
   </main>
 
@@ -566,6 +647,10 @@ INDEX_HTML = r"""<!doctype html>
     const pauseBtn = document.querySelector("#pauseBtn");
     const resumeBtn = document.querySelector("#resumeBtn");
     const cancelBtn = document.querySelector("#cancelBtn");
+    const reportBtn = document.querySelector("#reportBtn");
+    const historyBox = document.querySelector("#historyBox");
+    const suppressionInfo = document.querySelector("#suppressionInfo");
+    const activeCampaignsBox = document.querySelector("#activeCampaignsBox");
     const isHtmlToggle = document.querySelector("#isHtmlToggle");
     const plainEditorBox = document.querySelector("#plainEditorBox");
     const htmlEditorBox = document.querySelector("#htmlEditorBox");
@@ -669,6 +754,9 @@ INDEX_HTML = r"""<!doctype html>
     pauseBtn.addEventListener("click", () => fetch("/api/pause", { method: "POST" }).then(updateStatus));
     resumeBtn.addEventListener("click", () => fetch("/api/resume", { method: "POST" }).then(updateStatus));
     cancelBtn.addEventListener("click", () => fetch("/api/cancel", { method: "POST" }).then(updateStatus));
+    reportBtn.addEventListener("click", () => {
+      if (reportBtn.dataset.url) window.open(reportBtn.dataset.url, "_blank");
+    });
 
     function startPolling() {
       clearInterval(pollTimer);
@@ -681,9 +769,45 @@ INDEX_HTML = r"""<!doctype html>
         const response = await fetch("/api/status");
         const job = await response.json();
         renderJob(job);
+        updateHistory();
       } catch (error) {
         statusBox.className = "status error";
         statusBox.textContent = "Não foi possível atualizar o andamento da campanha.";
+      }
+    }
+
+    async function updateHistory() {
+      try {
+        const response = await fetch("/api/history");
+        const payload = await response.json();
+        suppressionInfo.textContent = `Lista de supressão: ${payload.suppression_count || 0} contato(s).`;
+        activeCampaignsBox.innerHTML = (payload.active_items || []).length
+          ? payload.active_items.map((item) => {
+              const when = item.scheduled_for_text || item.created_at_text || "";
+              return `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.status)} | ${item.sent}/${item.total} enviados | ${escapeHtml(when)}<br><button type="button" class="tool-btn active-cancel-btn" data-id="${escapeHtml(item.id)}">Cancelar campanha</button></div>`;
+            }).join("")
+          : "Nenhuma campanha em andamento.";
+        historyBox.innerHTML = (payload.items || []).length
+          ? payload.items.map((item) => {
+              const when = item.scheduled_for_text || item.created_at_text || "";
+              const footer = item.report_url ? `<a href="${item.report_url}" target="_blank">Relatório</a>` : "";
+              return `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.status)} | ${item.sent}/${item.total} enviados | ${escapeHtml(when)} ${footer}</div>`;
+            }).join("")
+          : "Nenhuma campanha registrada ainda.";
+        document.querySelectorAll(".active-cancel-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              await fetch(`/api/cancel?id=${encodeURIComponent(button.dataset.id)}`, { method: "POST" });
+              updateStatus();
+            } catch (error) {
+              button.disabled = false;
+            }
+          });
+        });
+      } catch (error) {
+        historyBox.textContent = "Não foi possível carregar o histórico.";
+        activeCampaignsBox.textContent = "Não foi possível carregar as campanhas em andamento.";
       }
     }
 
@@ -698,7 +822,9 @@ INDEX_HTML = r"""<!doctype html>
       const active = ["running", "paused"].includes(job.status);
       pauseBtn.disabled = job.status !== "running";
       resumeBtn.disabled = job.status !== "paused";
-      cancelBtn.disabled = !active;
+      cancelBtn.disabled = !["running", "paused", "scheduled"].includes(job.status);
+      reportBtn.disabled = !job.report_url;
+      reportBtn.dataset.url = job.report_url || "";
       statusBox.className = "status";
       if (job.status === "done") statusBox.classList.add("done");
       if (job.status === "failed" || job.status === "cancelled") statusBox.classList.add("error");
@@ -717,6 +843,7 @@ INDEX_HTML = r"""<!doctype html>
       if (job.status === "done") return "Campanha concluída.";
       if (job.status === "cancelled") return "Campanha cancelada.";
       if (job.status === "failed") return "A campanha foi interrompida por falha.";
+      if (job.status === "scheduled") return `Campanha agendada para ${job.scheduled_for_text || "horário informado"}.`;
       if (job.next_send_in && job.next_send_in > 0) return `Enviando com controle de ritmo. Próximo envio em ${job.next_send_in}s.`;
       return job.current ? `Processando ${job.current}` : "Envio em andamento.";
     }
@@ -729,14 +856,415 @@ INDEX_HTML = r"""<!doctype html>
 
     toggleEditorMode();
     updateStatus();
+    updateHistory();
   </script>
 </body>
 </html>
 """
+INDEX_HTML = INDEX_HTML.replace("__BRAND_IMAGE_URL__", BRAND_IMAGE_URL)
 
 
 def now_text() -> str:
     return time.strftime("%H:%M:%S")
+
+
+def format_timestamp(timestamp: float | None) -> str:
+    if not timestamp:
+        return ""
+    return datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M")
+
+
+def read_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def db_connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def get_master_key() -> bytes:
+    env_key = os.getenv("APP_MASTER_KEY", "").strip()
+    if env_key:
+        return hashlib.sha256(env_key.encode("utf-8")).digest()
+    if not KEY_PATH.exists():
+        KEY_PATH.write_bytes(base64.urlsafe_b64encode(secrets.token_bytes(32)))
+        try:
+            os.chmod(KEY_PATH, 0o600)
+        except OSError:
+            pass
+    return hashlib.sha256(KEY_PATH.read_bytes()).digest()
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    output = bytearray()
+    counter = 0
+    while len(output) < length:
+        block = hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
+        output.extend(block)
+        counter += 1
+    return bytes(output[:length])
+
+
+def encrypt_secret(secret_text: str) -> str:
+    plaintext = secret_text.encode("utf-8")
+    key = get_master_key()
+    nonce = secrets.token_bytes(16)
+    cipher = bytes(a ^ b for a, b in zip(plaintext, _keystream(key, nonce, len(plaintext))))
+    mac = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(nonce + mac + cipher).decode("ascii")
+
+
+def decrypt_secret(token: str) -> str:
+    blob = base64.urlsafe_b64decode(token.encode("ascii"))
+    nonce = blob[:16]
+    mac = blob[16:48]
+    cipher = blob[48:]
+    key = get_master_key()
+    expected = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected):
+        raise ValueError("Não foi possível validar a credencial armazenada.")
+    plain = bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher))))
+    return plain.decode("utf-8")
+
+
+def init_database() -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                sent INTEGER NOT NULL,
+                failed INTEGER NOT NULL,
+                skipped INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                scheduled_for REAL,
+                finished_at REAL,
+                report_path TEXT,
+                payload_json TEXT,
+                encrypted_password TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS suppression_list (
+                email TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        existing_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()
+        }
+        if "payload_json" not in existing_columns:
+            connection.execute("ALTER TABLE campaigns ADD COLUMN payload_json TEXT")
+        if "encrypted_password" not in existing_columns:
+            connection.execute("ALTER TABLE campaigns ADD COLUMN encrypted_password TEXT")
+        connection.commit()
+    migrate_legacy_storage()
+
+
+def migrate_legacy_storage() -> None:
+    legacy_history = read_json_file(LEGACY_HISTORY_FILE, [])
+    legacy_suppression = read_json_file(LEGACY_SUPPRESSION_FILE, {})
+    if not legacy_history and not legacy_suppression:
+        return
+    with DB_LOCK, db_connect() as connection:
+        for item in legacy_history:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO campaigns
+                (id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.get("id", str(uuid.uuid4())),
+                    item.get("sender", ""),
+                    item.get("subject", ""),
+                    item.get("status", "done"),
+                    int(item.get("total", 0)),
+                    int(item.get("sent", 0)),
+                    int(item.get("failed", 0)),
+                    int(item.get("skipped", 0)),
+                    float(item.get("created_at", time.time())),
+                    item.get("scheduled_for"),
+                    item.get("finished_at"),
+                    (item.get("report_url", "").split("id=")[-1] + ".csv") if item.get("report_url") else "",
+                ),
+            )
+        for email_address, payload in legacy_suppression.items():
+            connection.execute(
+                "INSERT OR REPLACE INTO suppression_list (email, reason, created_at) VALUES (?, ?, ?)",
+                (
+                    email_address.lower(),
+                    payload.get("reason", "Lista migrada"),
+                    payload.get("created_at", format_timestamp(time.time())),
+                ),
+            )
+        connection.commit()
+    if LEGACY_HISTORY_FILE.exists():
+        LEGACY_HISTORY_FILE.unlink()
+    if LEGACY_SUPPRESSION_FILE.exists():
+        LEGACY_SUPPRESSION_FILE.unlink()
+
+
+def load_history() -> list[dict[str, Any]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path
+            FROM campaigns
+            ORDER BY created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        report_path = row["report_path"] or ""
+        items.append(
+            {
+                "id": row["id"],
+                "sender": row["sender"],
+                "subject": row["subject"],
+                "status": row["status"],
+                "total": row["total"],
+                "sent": row["sent"],
+                "failed": row["failed"],
+                "skipped": row["skipped"],
+                "created_at": row["created_at"],
+                "created_at_text": format_timestamp(row["created_at"]),
+                "scheduled_for": row["scheduled_for"],
+                "scheduled_for_text": format_timestamp(row["scheduled_for"]),
+                "finished_at": row["finished_at"],
+                "finished_at_text": format_timestamp(row["finished_at"]),
+                "report_url": f"/api/report?id={row['id']}" if report_path else "",
+            }
+        )
+    return items
+
+
+def load_active_campaigns() -> list[dict[str, Any]]:
+    return [item for item in load_history() if item.get("status") in {"running", "paused", "scheduled"}]
+
+
+def load_suppression_list() -> dict[str, dict[str, str]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute("SELECT email, reason, created_at FROM suppression_list").fetchall()
+    return {
+        row["email"]: {
+            "reason": row["reason"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    }
+
+
+def recipient_domain(email_address: str) -> str:
+    return email_address.rsplit("@", 1)[-1].lower()
+
+
+def has_active_campaign() -> bool:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT id FROM campaigns WHERE status IN ('running', 'paused', 'scheduled') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row is not None
+
+
+def cancel_campaign_by_id(campaign_id: str) -> bool:
+    global CURRENT_JOB
+    if not campaign_id:
+        return False
+    cancelled = False
+    with JOB_LOCK:
+        if CURRENT_JOB and CURRENT_JOB.id == campaign_id and CURRENT_JOB.status in {"running", "paused", "scheduled"}:
+            CURRENT_JOB.cancel_event.set()
+            CURRENT_JOB.pause_event.clear()
+            CURRENT_JOB.status = "cancelled"
+            CURRENT_JOB.next_send_at = None
+            CURRENT_JOB.finished_at = time.time()
+            add_log(CURRENT_JOB, "Cancelamento solicitado pelo usuário.")
+            persist_campaign(CURRENT_JOB)
+            cancelled = True
+    if cancelled:
+        return True
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT id, status FROM campaigns WHERE id = ?",
+            (campaign_id,),
+        ).fetchone()
+        if not row or row["status"] not in {"running", "paused", "scheduled"}:
+            return False
+        connection.execute(
+            """
+            UPDATE campaigns
+            SET status = 'cancelled', finished_at = ?, payload_json = NULL, encrypted_password = NULL
+            WHERE id = ?
+            """,
+            (time.time(), campaign_id),
+        )
+        connection.commit()
+    return True
+
+
+def persist_scheduled_payload(
+    job_id: str,
+    payload: dict[str, Any],
+    password: str,
+) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            UPDATE campaigns
+            SET payload_json = ?, encrypted_password = ?
+            WHERE id = ?
+            """,
+            (json.dumps(payload, ensure_ascii=False), encrypt_secret(password), job_id),
+        )
+        connection.commit()
+
+
+def clear_scheduled_payload(job_id: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            "UPDATE campaigns SET payload_json = NULL, encrypted_password = NULL WHERE id = ?",
+            (job_id,),
+        )
+        connection.commit()
+
+
+def load_pending_scheduled_campaign() -> dict[str, Any] | None:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM campaigns
+            WHERE status = 'scheduled' AND payload_json IS NOT NULL AND encrypted_password IS NOT NULL
+            ORDER BY scheduled_for ASC, created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_report(job: MailJob) -> None:
+    report_path = REPORTS_DIR / f"{job.id}.csv"
+    with report_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["timestamp", "email", "domain", "status", "detail"],
+        )
+        writer.writeheader()
+        writer.writerows(job.report_rows)
+    job.report_path = report_path.name
+
+
+def campaign_summary(job: MailJob) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "sender": job.sender,
+        "subject": job.subject,
+        "status": job.status,
+        "total": job.total,
+        "sent": job.sent,
+        "failed": job.failed,
+        "skipped": job.skipped,
+        "created_at": job.created_at,
+        "created_at_text": format_timestamp(job.created_at),
+        "scheduled_for": job.scheduled_for,
+        "scheduled_for_text": format_timestamp(job.scheduled_for),
+        "finished_at": job.finished_at,
+        "finished_at_text": format_timestamp(job.finished_at),
+        "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+    }
+
+
+def persist_campaign(job: MailJob) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO campaigns
+            (id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path, payload_json, encrypted_password)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT payload_json FROM campaigns WHERE id = ?), NULL), COALESCE((SELECT encrypted_password FROM campaigns WHERE id = ?), NULL))
+            ON CONFLICT(id) DO UPDATE SET
+                sender=excluded.sender,
+                subject=excluded.subject,
+                status=excluded.status,
+                total=excluded.total,
+                sent=excluded.sent,
+                failed=excluded.failed,
+                skipped=excluded.skipped,
+                created_at=excluded.created_at,
+                scheduled_for=excluded.scheduled_for,
+                finished_at=excluded.finished_at,
+                report_path=excluded.report_path
+            """,
+            (
+                job.id,
+                job.sender,
+                job.subject,
+                job.status,
+                job.total,
+                job.sent,
+                job.failed,
+                job.skipped,
+                job.created_at,
+                job.scheduled_for,
+                job.finished_at,
+                job.report_path or "",
+                job.id,
+                job.id,
+            ),
+        )
+        connection.commit()
+
+
+def add_suppression(email_address: str, reason: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO suppression_list (email, reason, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                reason=excluded.reason,
+                created_at=excluded.created_at
+            """,
+            (
+                email_address.lower(),
+                reason,
+                format_timestamp(time.time()),
+            ),
+        )
+        connection.commit()
+
+
+def suppression_count() -> int:
+    return len(load_suppression_list())
+
+
+def is_permanent_smtp_error(exc: Exception) -> tuple[bool, str]:
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        for _, payload in exc.recipients.items():
+            if isinstance(payload, tuple) and payload:
+                code = int(payload[0])
+                if 500 <= code < 600:
+                    detail = payload[1].decode("utf-8", errors="replace") if isinstance(payload[1], bytes) else str(payload[1])
+                    return True, f"{code} {detail}".strip()
+    message = str(exc).lower()
+    permanent_hints = ["user unknown", "invalid recipient", "mailbox unavailable", "recipient address rejected", "not found"]
+    if any(hint in message for hint in permanent_hints):
+        return True, str(exc)
+    return False, str(exc)
 
 
 def add_log(job: MailJob, message: str) -> None:
@@ -865,6 +1393,16 @@ def field_value(fields: FormData, name: str, default: str = "") -> str:
     return str(values[0] if values[0] is not None else default)
 
 
+def parse_schedule(value: str) -> float | None:
+    raw_value = (value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.strptime(raw_value, "%Y-%m-%dT%H:%M").timestamp()
+    except ValueError as exc:
+        raise ValueError("A data de agendamento está inválida.") from exc
+
+
 def render_template(text: str, recipient: Recipient, sender: str) -> str:
     values = {"email": recipient.email, "sender": sender, **recipient.fields}
 
@@ -930,6 +1468,165 @@ def enforce_hourly_limit(job: MailJob, sent_times: list[float], max_per_hour: in
     return sleep_interruptibly(job, wait_for)
 
 
+def enforce_domain_spacing(job: MailJob, email_address: str, domain_times: dict[str, float]) -> bool:
+    domain = recipient_domain(email_address)
+    minimum_gap = 60 if domain in MICROSOFT_DOMAINS else 0
+    if not minimum_gap:
+        return True
+    last_time = domain_times.get(domain)
+    if last_time is None:
+        return True
+    remaining = int(minimum_gap - (time.time() - last_time))
+    if remaining <= 0:
+        return True
+    add_log(job, f"Domínio {domain} em modo conservador. Aguardando {remaining}s antes do próximo envio.")
+    return sleep_interruptibly(job, remaining)
+
+
+def record_report_row(job: MailJob, email_address: str, status: str, detail: str) -> None:
+    job.report_rows.append(
+        {
+            "timestamp": format_timestamp(time.time()),
+            "email": email_address,
+            "domain": recipient_domain(email_address),
+            "status": status,
+            "detail": detail,
+        }
+    )
+
+
+def build_scheduled_payload(
+    recipients: list[Recipient],
+    body: str,
+    is_html: bool,
+    reply_to: str,
+    delay_min: int,
+    delay_max: int,
+    batch_size: int,
+    batch_pause: int,
+    max_per_hour: int,
+    send_copy_to_self: bool,
+) -> dict[str, Any]:
+    return {
+        "recipients": [{"email": item.email, "fields": item.fields} for item in recipients],
+        "body": body,
+        "is_html": is_html,
+        "reply_to": reply_to,
+        "delay_min": delay_min,
+        "delay_max": delay_max,
+        "batch_size": batch_size,
+        "batch_pause": batch_pause,
+        "max_per_hour": max_per_hour,
+        "send_copy_to_self": send_copy_to_self,
+    }
+
+
+def restore_scheduled_campaigns() -> None:
+    global CURRENT_JOB
+    pending = load_pending_scheduled_campaign()
+    if not pending:
+        return
+    payload = json.loads(pending["payload_json"])
+    job = MailJob(
+        id=pending["id"],
+        sender=pending["sender"],
+        total=int(pending["total"]),
+        subject=pending["subject"],
+        status="scheduled",
+        sent=int(pending["sent"]),
+        failed=int(pending["failed"]),
+        skipped=int(pending["skipped"]),
+        created_at=float(pending["created_at"]),
+        started_at=float(pending["created_at"]),
+        finished_at=pending["finished_at"],
+        scheduled_for=pending["scheduled_for"],
+        report_path=pending["report_path"] or None,
+    )
+    with JOB_LOCK:
+        CURRENT_JOB = job
+    add_log(job, "Campanha agendada recuperada do banco após reinício da aplicação.")
+    persist_campaign(job)
+    recipients = [
+        Recipient(email=item["email"], fields=item.get("fields", {}))
+        for item in payload.get("recipients", [])
+    ]
+    password = decrypt_secret(pending["encrypted_password"])
+    thread = threading.Thread(
+        target=run_scheduled_job,
+        args=(
+            job,
+            password,
+            recipients,
+            payload.get("body", ""),
+            bool(payload.get("is_html")),
+            payload.get("reply_to", ""),
+            int(payload.get("delay_min", 20)),
+            int(payload.get("delay_max", 45)),
+            int(payload.get("batch_size", 25)),
+            int(payload.get("batch_pause", 300)),
+            int(payload.get("max_per_hour", 90)),
+            bool(payload.get("send_copy_to_self", True)),
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+
+def finish_job(job: MailJob) -> None:
+    save_report(job)
+    clear_scheduled_payload(job.id)
+    persist_campaign(job)
+
+
+def run_scheduled_job(
+    job: MailJob,
+    password: str,
+    recipients: list[Recipient],
+    body: str,
+    is_html: bool,
+    reply_to: str,
+    delay_min: int,
+    delay_max: int,
+    batch_size: int,
+    batch_pause: int,
+    max_per_hour: int,
+    send_copy_to_self: bool,
+) -> None:
+    if job.scheduled_for:
+        wait_seconds = int(max(0, job.scheduled_for - time.time()))
+        if wait_seconds:
+            add_log(job, f"Campanha agendada para {format_timestamp(job.scheduled_for)}.")
+            persist_campaign(job)
+            if not sleep_interruptibly(job, wait_seconds):
+                with JOB_LOCK:
+                    job.finished_at = time.time()
+                    job.status = "cancelled"
+                add_log(job, "Campanha agendada cancelada antes do início.")
+                finish_job(job)
+                return
+    if job.cancel_event.is_set():
+        with JOB_LOCK:
+            job.finished_at = time.time()
+            job.status = "cancelled"
+        add_log(job, "Campanha cancelada antes do início.")
+        finish_job(job)
+        return
+    run_job(
+        job,
+        password,
+        recipients,
+        body,
+        is_html,
+        reply_to,
+        delay_min,
+        delay_max,
+        batch_size,
+        batch_pause,
+        max_per_hour,
+        send_copy_to_self,
+    )
+
+
 def run_job(
     job: MailJob,
     password: str,
@@ -945,8 +1642,11 @@ def run_job(
     send_copy_to_self: bool,
 ) -> None:
     sent_times: list[float] = []
+    domain_times: dict[str, float] = {}
+    suppression = load_suppression_list()
     context = ssl.create_default_context()
     add_log(job, f"Conectando ao servidor {SMTP_SERVER}:{SMTP_PORT}.")
+    persist_campaign(job)
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=45) as smtp:
             smtp.ehlo()
@@ -967,20 +1667,39 @@ def run_job(
                     job.status = "running"
                     job.current = recipient.email
 
+                if recipient.email in suppression:
+                    with JOB_LOCK:
+                        job.skipped += 1
+                    detail = f"Supresso: {suppression[recipient.email].get('reason', 'lista de supressão')}"
+                    add_log(job, f"{recipient.email} ignorado por lista de supressão.")
+                    record_report_row(job, recipient.email, "suppressed", detail)
+                    continue
+
                 if not enforce_hourly_limit(job, sent_times, max_per_hour):
+                    break
+                if not enforce_domain_spacing(job, recipient.email, domain_times):
                     break
 
                 try:
                     message = build_message(job.sender, recipient, job.subject, body, is_html, reply_to)
                     smtp.send_message(message)
                     sent_times.append(time.time())
+                    domain_times[recipient_domain(recipient.email)] = time.time()
                     with JOB_LOCK:
                         job.sent += 1
                     add_log(job, f"Enviado para {recipient.email} ({index}/{job.total}).")
+                    record_report_row(job, recipient.email, "sent", "Entregue ao servidor SMTP.")
                 except Exception as exc:  # noqa: BLE001
+                    domain_times[recipient_domain(recipient.email)] = time.time()
                     with JOB_LOCK:
                         job.failed += 1
                     add_log(job, f"Falha ao enviar para {recipient.email}: {exc}")
+                    permanent, detail = is_permanent_smtp_error(exc)
+                    record_report_row(job, recipient.email, "failed", detail)
+                    if permanent:
+                        add_suppression(recipient.email, detail)
+                        suppression[recipient.email] = {"reason": detail, "created_at": format_timestamp(time.time())}
+                        add_log(job, f"{recipient.email} entrou na lista de supressão por falha permanente.")
 
                 if index < len(recipients):
                     if batch_size and index % batch_size == 0 and batch_pause:
@@ -1003,19 +1722,21 @@ def run_job(
             job.finished_at = time.time()
             job.status = "cancelled" if job.cancel_event.is_set() else "done"
         add_log(job, "Campanha cancelada." if job.cancel_event.is_set() else "Campanha concluída.")
+        finish_job(job)
     except Exception as exc:  # noqa: BLE001
         with JOB_LOCK:
             job.current = ""
             job.finished_at = time.time()
             job.status = "failed"
         add_log(job, f"Envio interrompido: {exc}")
+        finish_job(job)
 
 
 def job_snapshot() -> dict[str, Any]:
     with JOB_LOCK:
         job = CURRENT_JOB
         if not job:
-            return {"id": None, "status": "idle", "logs": []}
+            return {"id": None, "status": "idle", "logs": [], "suppression_count": suppression_count()}
         next_send_in = 0
         if job.next_send_at:
             next_send_in = max(0, int(job.next_send_at - time.time()))
@@ -1030,6 +1751,9 @@ def job_snapshot() -> dict[str, Any]:
             "skipped": job.skipped,
             "current": job.current,
             "next_send_in": next_send_in,
+            "scheduled_for_text": format_timestamp(job.scheduled_for),
+            "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+            "suppression_count": suppression_count(),
             "logs": list(job.logs),
         }
 
@@ -1038,26 +1762,49 @@ class MailerHandler(BaseHTTPRequestHandler):
     server_version = "MalaDiretaTCE/1.0"
 
     def do_GET(self) -> None:
-        if self.path in {"/", "/index.html"}:
+        parsed = urlparse(self.path)
+        if parsed.path in {"/", "/index.html"}:
             self.send_text(INDEX_HTML, "text/html; charset=utf-8")
             return
-        if self.path == "/api/status":
+        if parsed.path == "/api/status":
             self.send_json(job_snapshot())
+            return
+        if parsed.path == "/api/history":
+            self.send_json(
+                {
+                    "items": load_history()[:10],
+                    "active_items": load_active_campaigns(),
+                    "suppression_count": suppression_count(),
+                }
+            )
+            return
+        if parsed.path == "/api/report":
+            report_id = parse_qs(parsed.query).get("id", [""])[0]
+            report_path = REPORTS_DIR / f"{report_id}.csv"
+            if not report_id or not report_path.exists():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_bytes(
+                report_path.read_bytes(),
+                "text/csv; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename=\"relatorio-{report_id}.csv\"'},
+            )
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         try:
-            if self.path == "/api/preview":
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/preview":
                 self.handle_preview()
-            elif self.path == "/api/start":
+            elif parsed.path == "/api/start":
                 self.handle_start()
-            elif self.path == "/api/pause":
+            elif parsed.path == "/api/pause":
                 self.handle_pause()
-            elif self.path == "/api/resume":
+            elif parsed.path == "/api/resume":
                 self.handle_resume()
-            elif self.path == "/api/cancel":
-                self.handle_cancel()
+            elif parsed.path == "/api/cancel":
+                self.handle_cancel(parsed)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -1080,8 +1827,10 @@ class MailerHandler(BaseHTTPRequestHandler):
         global CURRENT_JOB
 
         with JOB_LOCK:
-            if CURRENT_JOB and CURRENT_JOB.status in {"running", "paused"}:
+            if CURRENT_JOB and CURRENT_JOB.status in {"running", "paused", "scheduled"}:
                 raise ValueError("Já existe uma campanha em andamento. Pause, cancele ou aguarde terminar.")
+        if has_active_campaign():
+            raise ValueError("Já existe uma campanha ativa ou agendada. Conclua ou cancele antes de criar outra.")
 
         fields = self.read_form()
         sender = clean_username(field_value(fields, "username"))
@@ -1108,24 +1857,35 @@ class MailerHandler(BaseHTTPRequestHandler):
         batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
         max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
         reply_to = field_value(fields, "reply_to").strip()
+        scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
         if reply_to and not EMAIL_RE.match(reply_to):
             raise ValueError("O campo Responder para precisa ser um e-mail válido.")
+        if scheduled_for and scheduled_for <= time.time():
+            scheduled_for = None
 
         job = MailJob(
             id=str(uuid.uuid4()),
             sender=sender,
             total=len(recipients),
             subject=subject,
+            status="scheduled" if scheduled_for else "running",
             skipped=invalid,
+            scheduled_for=scheduled_for,
         )
         with JOB_LOCK:
             CURRENT_JOB = job
-        add_log(job, "Campanha criada. Preparando autenticação e fila de envio.")
+        add_log(
+            job,
+            "Campanha criada. Preparando autenticação e fila de envio."
+            if not scheduled_for
+            else f"Campanha criada e agendada para {format_timestamp(scheduled_for)}.",
+        )
+        persist_campaign(job)
         if invalid:
             add_log(job, f"{invalid} item(ns) inválido(s) ou duplicado(s) foram ignorados.")
 
         thread = threading.Thread(
-            target=run_job,
+            target=run_scheduled_job if scheduled_for else run_job,
             args=(
                 job,
                 password,
@@ -1142,6 +1902,23 @@ class MailerHandler(BaseHTTPRequestHandler):
             ),
             daemon=True,
         )
+        if scheduled_for:
+            persist_scheduled_payload(
+                job.id,
+                build_scheduled_payload(
+                    recipients,
+                    body,
+                    is_html,
+                    reply_to,
+                    delay_min,
+                    delay_max,
+                    batch_size,
+                    batch_pause,
+                    max_per_hour,
+                    parse_bool(field_value(fields, "send_copy_to_self")),
+                ),
+                password,
+            )
         thread.start()
         self.send_json({"ok": True, "job_id": job.id, "job": job_snapshot()})
 
@@ -1156,6 +1933,7 @@ class MailerHandler(BaseHTTPRequestHandler):
                 should_log = True
         if should_log and job:
             add_log(job, "Pausa solicitada pelo usuário.")
+            persist_campaign(job)
         self.send_json(job_snapshot())
 
     def handle_resume(self) -> None:
@@ -1168,21 +1946,28 @@ class MailerHandler(BaseHTTPRequestHandler):
                 should_log = True
         if should_log and job:
             add_log(job, "Envio retomado pelo usuário.")
+            persist_campaign(job)
         self.send_json(job_snapshot())
 
-    def handle_cancel(self) -> None:
-        should_log = False
-        with JOB_LOCK:
-            job = CURRENT_JOB
-            if job and job.status in {"running", "paused"}:
-                job.cancel_event.set()
-                job.pause_event.clear()
-                job.status = "cancelled"
-                job.next_send_at = None
-                should_log = True
-        if should_log and job:
-            add_log(job, "Cancelamento solicitado pelo usuário.")
-        self.send_json(job_snapshot())
+    def handle_cancel(self, parsed: Any) -> None:
+        campaign_id = parse_qs(parsed.query).get("id", [""])[0]
+        if not campaign_id:
+            with JOB_LOCK:
+                job = CURRENT_JOB
+                campaign_id = job.id if job and job.status in {"running", "paused", "scheduled"} else ""
+        if not campaign_id:
+            raise ValueError("Nenhuma campanha em andamento foi encontrada para cancelar.")
+        if not cancel_campaign_by_id(campaign_id):
+            raise ValueError("Não foi possível cancelar a campanha informada.")
+        self.send_json(
+            {
+                "ok": True,
+                "job": job_snapshot(),
+                "active_items": load_active_campaigns(),
+                "items": load_history()[:10],
+                "suppression_count": suppression_count(),
+            }
+        )
 
     def read_form(self) -> FormData:
         content_type = self.headers.get("Content-Type", "")
@@ -1193,18 +1978,24 @@ class MailerHandler(BaseHTTPRequestHandler):
         return parse_multipart_form(raw_body, content_type)
 
     def send_text(self, content: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        raw = content.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self.send_bytes(content.encode("utf-8"), content_type, status)
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_bytes(raw, "application/json; charset=utf-8", status)
+
+    def send_bytes(
+        self,
+        raw: bytes,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -1213,6 +2004,8 @@ class MailerHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    init_database()
+    restore_scheduled_campaigns()
     httpd = ThreadingHTTPServer((APP_HOST, APP_PORT), MailerHandler)
     print(f"Mala Direta TCE/AL aberta em http://{APP_HOST}:{APP_PORT}")
     httpd.serve_forever()

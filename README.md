@@ -57,9 +57,21 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 - Delay aleatório entre entregas.
 - Pausa automática por lote.
 - Limite máximo de envios por hora.
+- Espaçamento extra automático para domínios Microsoft.
 - Pausar, retomar e cancelar campanha em andamento.
+- Agendamento de campanha para data e hora futura.
+- Histórico local das campanhas com relatório CSV por envio.
+- Lista de supressão para falhas permanentes.
+- Banco SQLite local em `data/mala_direta.db` para persistir histórico e supressões.
+- Chave local em `data/app.key` para cifrar a senha das campanhas agendadas.
 - Validação e remoção de e-mails duplicados antes do envio.
-- Senha mantida apenas em memória durante a execução.
+- Senha mantida em memória para envios imediatos e armazenada cifrada apenas quando a campanha é agendada.
+
+## Persistência
+
+- Campanhas agendadas ficam salvas no banco e são recuperadas quando a aplicação reinicia.
+- A senha usada nessas campanhas é armazenada cifrada localmente.
+- Se quiser controlar a cifra com uma chave definida por você, configure `APP_MASTER_KEY` no ambiente antes de subir a aplicação.
 
 ## CSV esperado
 
