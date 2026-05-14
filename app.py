@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import cgi
 import csv
 import html
 import io
@@ -14,7 +13,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from string import Template
@@ -25,7 +26,7 @@ SMTP_SERVER = "smtp.tceal.tc.br"
 SMTP_PORT = 587
 EMAIL_DOMAIN = "@tceal.tc.br"
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
-APP_PORT = int(os.getenv("APP_PORT", "8080"))
+APP_PORT = int(os.getenv("APP_PORT", "8086"))
 
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
@@ -35,6 +36,18 @@ TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 class Recipient:
     email: str
     fields: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class FormFile:
+    filename: str
+    value: bytes
+
+
+@dataclass
+class FormData:
+    fields: dict[str, list[str]] = field(default_factory=dict)
+    files: dict[str, FormFile] = field(default_factory=dict)
 
 
 @dataclass
@@ -343,6 +356,39 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 13px;
       line-height: 1.45;
     }
+    .editor-shell {
+      border: 1px solid #c6ced8;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .editor-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--line);
+    }
+    .tool-btn {
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 5px;
+      font-size: 13px;
+      border: 1px solid #c6ced8;
+      background: #fff;
+    }
+    .html-editor {
+      min-height: 180px;
+      padding: 12px;
+      outline: none;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    .html-editor:empty:before {
+      content: "Digite aqui a mensagem da mala direta.";
+      color: var(--muted);
+    }
     @media (max-width: 900px) {
       main { grid-template-columns: 1fr; padding: 14px; }
       aside { position: static; }
@@ -420,13 +466,33 @@ INDEX_HTML = r"""<!doctype html>
             Assunto
             <input name="subject" required placeholder="Assunto da mensagem">
           </label>
-          <label>
-            Corpo
-            <textarea name="body" required placeholder="Olá {{nome}},&#10;&#10;Digite aqui a mensagem da mala direta."></textarea>
-          </label>
           <div class="checks">
-            <label class="check"><input type="checkbox" name="is_html"> Corpo em HTML</label>
+            <label class="check"><input type="checkbox" name="is_html" id="isHtmlToggle"> Editor HTML</label>
             <label class="check"><input type="checkbox" name="send_copy_to_self" checked> Enviar cópia para mim no final</label>
+          </div>
+          <div id="plainEditorBox">
+            <label>
+              Corpo
+              <textarea name="body" id="plainBody" required placeholder="Olá {{nome}},&#10;&#10;Digite aqui a mensagem da mala direta."></textarea>
+            </label>
+          </div>
+          <div id="htmlEditorBox" class="hidden">
+            <label>
+              Corpo em HTML
+              <div class="editor-shell">
+                <div class="editor-toolbar">
+                  <button type="button" class="tool-btn" data-command="bold"><strong>B</strong></button>
+                  <button type="button" class="tool-btn" data-command="italic"><em>I</em></button>
+                  <button type="button" class="tool-btn" data-command="underline"><u>U</u></button>
+                  <button type="button" class="tool-btn" data-command="insertUnorderedList">Lista</button>
+                  <button type="button" class="tool-btn" data-command="createLink">Link</button>
+                  <button type="button" class="tool-btn" data-command="removeFormat">Limpar</button>
+                </div>
+                <div id="htmlBodyEditor" class="html-editor" contenteditable="true">Olá {{nome}},<br><br>Digite aqui a mensagem da mala direta.</div>
+              </div>
+            </label>
+            <textarea name="body_html" id="htmlBodyValue" class="hidden"></textarea>
+            <div class="hint">Use a barra para aplicar negrito, itálico, sublinhado, lista e link. As variáveis como {{nome}} continuam funcionando.</div>
           </div>
         </div>
 
@@ -500,6 +566,12 @@ INDEX_HTML = r"""<!doctype html>
     const pauseBtn = document.querySelector("#pauseBtn");
     const resumeBtn = document.querySelector("#resumeBtn");
     const cancelBtn = document.querySelector("#cancelBtn");
+    const isHtmlToggle = document.querySelector("#isHtmlToggle");
+    const plainEditorBox = document.querySelector("#plainEditorBox");
+    const htmlEditorBox = document.querySelector("#htmlEditorBox");
+    const plainBody = document.querySelector("#plainBody");
+    const htmlBodyEditor = document.querySelector("#htmlBodyEditor");
+    const htmlBodyValue = document.querySelector("#htmlBodyValue");
     let pollTimer = null;
 
     document.querySelectorAll(".tab").forEach((tab) => {
@@ -512,10 +584,56 @@ INDEX_HTML = r"""<!doctype html>
     });
 
     function formDataWithSource() {
+      syncBodyFields();
       const data = new FormData(form);
       data.set("source", document.querySelector(".tab.active").dataset.target.replace("Box", ""));
       return data;
     }
+
+    function syncBodyFields() {
+      htmlBodyValue.value = htmlBodyEditor.innerHTML.trim();
+    }
+
+    function encodeHtml(text) {
+      return String(text)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\n", "<br>");
+    }
+
+    function toggleEditorMode() {
+      const htmlMode = isHtmlToggle.checked;
+      plainEditorBox.classList.toggle("hidden", htmlMode);
+      htmlEditorBox.classList.toggle("hidden", !htmlMode);
+      plainBody.required = !htmlMode;
+      htmlBodyValue.required = htmlMode;
+      if (htmlMode && !htmlBodyEditor.innerHTML.trim()) {
+        htmlBodyEditor.innerHTML = plainBody.value.trim()
+          ? encodeHtml(plainBody.value)
+          : "Olá {{nome}},<br><br>Digite aqui a mensagem da mala direta.";
+      }
+      if (!htmlMode && !plainBody.value.trim()) {
+        plainBody.value = htmlBodyEditor.innerText.trim();
+      }
+      syncBodyFields();
+    }
+
+    isHtmlToggle.addEventListener("change", toggleEditorMode);
+    htmlBodyEditor.addEventListener("input", syncBodyFields);
+
+    document.querySelectorAll(".tool-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        htmlBodyEditor.focus();
+        if (button.dataset.command === "createLink") {
+          const link = window.prompt("Informe a URL do link:");
+          if (link) document.execCommand("createLink", false, link);
+        } else {
+          document.execCommand(button.dataset.command, false, null);
+        }
+        syncBodyFields();
+      });
+    });
 
     async function post(path, data) {
       const response = await fetch(path, { method: "POST", body: data });
@@ -539,7 +657,8 @@ INDEX_HTML = r"""<!doctype html>
       statusBox.className = "status";
       statusBox.textContent = "Preparando campanha...";
       try {
-        await post("/api/start", formDataWithSource());
+        const payload = await post("/api/start", formDataWithSource());
+        if (payload.job) renderJob(payload.job);
         startPolling();
       } catch (error) {
         statusBox.className = "status error";
@@ -558,9 +677,14 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function updateStatus() {
-      const response = await fetch("/api/status");
-      const job = await response.json();
-      renderJob(job);
+      try {
+        const response = await fetch("/api/status");
+        const job = await response.json();
+        renderJob(job);
+      } catch (error) {
+        statusBox.className = "status error";
+        statusBox.textContent = "Não foi possível atualizar o andamento da campanha.";
+      }
     }
 
     function renderJob(job) {
@@ -603,6 +727,7 @@ INDEX_HTML = r"""<!doctype html>
       }[char]));
     }
 
+    toggleEditorMode();
     updateStatus();
   </script>
 </body>
@@ -618,6 +743,36 @@ def add_log(job: MailJob, message: str) -> None:
     with JOB_LOCK:
         job.logs.append({"time": now_text(), "message": message})
         job.logs = job.logs[-300:]
+
+
+def sanitize_html(raw_html: str) -> str:
+    cleaned = re.sub(r"<script\b[^>]*>.*?</script>", "", raw_html or "", flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"\son\w+\s*=\s*(\".*?\"|'.*?'|[^\s>]+)", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def parse_multipart_form(raw_body: bytes, content_type: str) -> FormData:
+    message = BytesParser(policy=policy.default).parsebytes(
+        b"MIME-Version: 1.0\r\n"
+        + f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+        + raw_body
+    )
+    form = FormData()
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        if filename:
+            form.files[name] = FormFile(filename=filename, value=payload)
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        value = payload.decode(charset, errors="replace")
+        form.fields.setdefault(name, []).append(value)
+    return form
 
 
 def parse_bool(value: Any) -> bool:
@@ -671,20 +826,20 @@ def parse_csv_recipients(raw: bytes) -> list[Recipient]:
     return recipients
 
 
-def parse_recipients(fields: cgi.FieldStorage) -> tuple[list[Recipient], int]:
+def parse_recipients(fields: FormData) -> tuple[list[Recipient], int]:
     source = field_value(fields, "source", "csv")
     recipients: list[Recipient] = []
 
     if source == "csv":
-        file_item = fields["csv_file"] if "csv_file" in fields else None
-        if file_item is None or not getattr(file_item, "filename", ""):
+        file_item = fields.files.get("csv_file")
+        if file_item is None or not file_item.filename:
             raise ValueError("Selecione um arquivo CSV.")
-        recipients = parse_csv_recipients(file_item.file.read())
+        recipients = parse_csv_recipients(file_item.value)
     elif source == "txt":
-        file_item = fields["txt_file"] if "txt_file" in fields else None
-        if file_item is None or not getattr(file_item, "filename", ""):
+        file_item = fields.files.get("txt_file")
+        if file_item is None or not file_item.filename:
             raise ValueError("Selecione um arquivo TXT.")
-        recipients = extract_emails(file_item.file.read().decode("utf-8-sig", errors="replace"))
+        recipients = extract_emails(file_item.value.decode("utf-8-sig", errors="replace"))
     else:
         recipients = extract_emails(field_value(fields, "manual_emails", ""))
 
@@ -703,13 +858,11 @@ def parse_recipients(fields: cgi.FieldStorage) -> tuple[list[Recipient], int]:
     return valid, invalid
 
 
-def field_value(fields: cgi.FieldStorage, name: str, default: str = "") -> str:
-    if name not in fields:
+def field_value(fields: FormData, name: str, default: str = "") -> str:
+    values = fields.fields.get(name)
+    if not values:
         return default
-    value = fields.getvalue(name)
-    if isinstance(value, list):
-        value = value[0] if value else default
-    return str(value if value is not None else default)
+    return str(values[0] if values[0] is not None else default)
 
 
 def render_template(text: str, recipient: Recipient, sender: str) -> str:
@@ -940,7 +1093,10 @@ class MailerHandler(BaseHTTPRequestHandler):
             raise ValueError("Nenhum e-mail válido foi encontrado.")
 
         subject = field_value(fields, "subject").strip()
-        body = field_value(fields, "body").strip()
+        is_html = parse_bool(field_value(fields, "is_html"))
+        body = field_value(fields, "body_html" if is_html else "body").strip()
+        if is_html:
+            body = sanitize_html(body)
         if not subject or not body:
             raise ValueError("Informe assunto e corpo da mensagem.")
 
@@ -964,6 +1120,7 @@ class MailerHandler(BaseHTTPRequestHandler):
         )
         with JOB_LOCK:
             CURRENT_JOB = job
+        add_log(job, "Campanha criada. Preparando autenticação e fila de envio.")
         if invalid:
             add_log(job, f"{invalid} item(ns) inválido(s) ou duplicado(s) foram ignorados.")
 
@@ -974,7 +1131,7 @@ class MailerHandler(BaseHTTPRequestHandler):
                 password,
                 recipients,
                 body,
-                parse_bool(field_value(fields, "is_html")),
+                is_html,
                 reply_to,
                 delay_min,
                 delay_max,
@@ -986,7 +1143,7 @@ class MailerHandler(BaseHTTPRequestHandler):
             daemon=True,
         )
         thread.start()
-        self.send_json({"ok": True, "job_id": job.id})
+        self.send_json({"ok": True, "job_id": job.id, "job": job_snapshot()})
 
     def handle_pause(self) -> None:
         should_log = False
@@ -1027,19 +1184,13 @@ class MailerHandler(BaseHTTPRequestHandler):
             add_log(job, "Cancelamento solicitado pelo usuário.")
         self.send_json(job_snapshot())
 
-    def read_form(self) -> cgi.FieldStorage:
+    def read_form(self) -> FormData:
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
             raise ValueError("Envie os dados do formulário corretamente.")
-        return cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+        return parse_multipart_form(raw_body, content_type)
 
     def send_text(self, content: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         raw = content.encode("utf-8")

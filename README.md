@@ -11,7 +11,7 @@ python3 app.py
 Depois acesse:
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:8086
 ```
 
 ## Como rodar em Docker
@@ -25,7 +25,7 @@ docker compose up --build
 Depois acesse:
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:8086
 ```
 
 Para rodar em segundo plano:
@@ -44,10 +44,10 @@ docker compose down
 
 ```bash
 docker build -t mala-direta-tceal .
-docker run --rm -p 8080:8080 --name mala-direta-tceal mala-direta-tceal
+docker run --rm -p 8086:8086 --name mala-direta-tceal mala-direta-tceal
 ```
 
-O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8080`.
+O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 
 ## Recursos
 
