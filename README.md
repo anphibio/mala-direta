@@ -62,6 +62,7 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 - Agendamento de campanha para data e hora futura.
 - Histórico local das campanhas com relatório CSV por envio.
 - Lista de supressão para falhas permanentes.
+- Monitoramento de retornos por IMAP após o envio, para detectar bounces no Zimbra.
 - Banco SQLite local em `data/mala_direta.db` para persistir histórico e supressões.
 - Chave local em `data/app.key` para cifrar a senha das campanhas agendadas.
 - Validação e remoção de e-mails duplicados antes do envio.
@@ -72,6 +73,7 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 - Campanhas agendadas ficam salvas no banco e são recuperadas quando a aplicação reinicia.
 - A senha usada nessas campanhas é armazenada cifrada localmente.
 - Se quiser controlar a cifra com uma chave definida por você, configure `APP_MASTER_KEY` no ambiente antes de subir a aplicação.
+- O monitoramento IMAP usa, por padrão, `IMAP_SERVER=smtp.tceal.tc.br`, `IMAP_PORT=993`, caixa `INBOX`, janela de 900 segundos e intervalo de 60 segundos. Esses valores podem ser ajustados por ambiente.
 
 ## CSV esperado
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import html
+import imaplib
 import io
 import json
 import os
@@ -33,6 +34,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 SMTP_SERVER = "smtp.tceal.tc.br"
 SMTP_PORT = 587
 EMAIL_DOMAIN = "@tceal.tc.br"
+IMAP_SERVER = os.getenv("IMAP_SERVER", SMTP_SERVER)
+IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
+IMAP_MAILBOX = os.getenv("IMAP_MAILBOX", "INBOX")
+IMAP_BOUNCE_WINDOW_SECONDS = int(os.getenv("IMAP_BOUNCE_WINDOW_SECONDS", "900"))
+IMAP_BOUNCE_POLL_SECONDS = int(os.getenv("IMAP_BOUNCE_POLL_SECONDS", "60"))
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8086"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Maceio")
@@ -64,6 +70,7 @@ except ZoneInfoNotFoundError:
 
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
+BASIC_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 BRAND_IMAGE_URL = "https://www.tceal.tc.br/view/img/logo_main.png"
 
 
@@ -1621,6 +1628,38 @@ def build_message(
     return message
 
 
+def decode_smtp_message(raw: bytes | str) -> str:
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace").strip()
+    return str(raw or "").strip()
+
+
+def smtp_response_text(code: int, raw: bytes | str) -> str:
+    detail = decode_smtp_message(raw)
+    return f"{code} {detail}".strip()
+
+
+def deliver_message_via_smtp(smtp: smtplib.SMTP, message: EmailMessage) -> str:
+    sender = str(message["From"] or "").strip()
+    recipient = str(message["To"] or "").strip()
+    if not sender or not recipient:
+        raise ValueError("Mensagem sem remetente ou destinatário válido.")
+
+    code, reply = smtp.mail(sender)
+    if code not in {250}:
+        raise smtplib.SMTPSenderRefused(code, decode_smtp_message(reply), sender)
+
+    code, reply = smtp.rcpt(recipient)
+    if code not in {250, 251}:
+        raise smtplib.SMTPRecipientsRefused({recipient: (code, reply)})
+
+    code, reply = smtp.data(message.as_bytes())
+    if code not in {250}:
+        raise smtplib.SMTPDataError(code, decode_smtp_message(reply))
+
+    return smtp_response_text(code, reply)
+
+
 def sleep_interruptibly(job: MailJob, seconds: int) -> bool:
     target = time.time() + max(0, seconds)
     with JOB_LOCK:
@@ -1678,6 +1717,142 @@ def record_report_row(job: MailJob, email_address: str, status: str, detail: str
             "detail": detail,
         }
     )
+
+
+def extract_text_parts(message: EmailMessage) -> list[str]:
+    texts: list[str] = []
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True) or b""
+                charset = part.get_content_charset() or "utf-8"
+                texts.append(payload.decode(charset, errors="replace"))
+    else:
+        payload = message.get_payload(decode=True) or b""
+        charset = message.get_content_charset() or "utf-8"
+        texts.append(payload.decode(charset, errors="replace"))
+    return texts
+
+
+def bounce_summary(message: EmailMessage) -> str:
+    details: list[str] = []
+    for text in extract_text_parts(message):
+        for line in text.splitlines():
+            normalized = line.strip()
+            lower = normalized.lower()
+            if lower.startswith(("action:", "status:", "diagnostic-code:", "remote-mta:", "final-recipient:")):
+                details.append(normalized)
+        if details:
+            break
+    if details:
+        return " | ".join(details[:4])
+    subject = str(message.get("Subject", "")).strip()
+    return subject or "Retorno de entrega identificado por IMAP."
+
+
+def is_bounce_message(message: EmailMessage) -> bool:
+    sender = str(message.get("From", "")).lower()
+    subject = str(message.get("Subject", "")).lower()
+    content_type = message.get_content_type().lower()
+    hints = ["mailer-daemon", "postmaster", "mail delivery subsystem", "delivery status notification"]
+    subject_hints = ["undelivered", "delivery failure", "failure notice", "returned mail", "mail delivery failed"]
+    if content_type == "multipart/report":
+        return True
+    if any(hint in sender for hint in hints):
+        return True
+    return any(hint in subject for hint in subject_hints)
+
+
+def extract_bounced_recipients(message: EmailMessage, expected: set[str]) -> set[str]:
+    matches: set[str] = set()
+    for text in extract_text_parts(message):
+        lower_text = text.lower()
+        if "final-recipient:" in lower_text or "original-recipient:" in lower_text:
+            for found in BASIC_EMAIL_RE.findall(text):
+                normalized = found.lower()
+                if normalized in expected:
+                    matches.add(normalized)
+        if matches:
+            return matches
+    combined = "\n".join(extract_text_parts(message))
+    for found in BASIC_EMAIL_RE.findall(combined):
+        normalized = found.lower()
+        if normalized in expected:
+            matches.add(normalized)
+    return matches
+
+
+def monitor_bounces_via_imap(
+    job: MailJob,
+    sender: str,
+    password: str,
+    accepted_recipients: set[str],
+) -> None:
+    if not accepted_recipients or IMAP_BOUNCE_WINDOW_SECONDS <= 0:
+        return
+    seen_bounces = {
+        row["email"].lower()
+        for row in job.report_rows
+        if row.get("status") == "bounced_imap"
+    }
+    add_log(
+        job,
+        f"Monitorando retornos por IMAP em {IMAP_SERVER}:{IMAP_PORT} por até {IMAP_BOUNCE_WINDOW_SECONDS}s.",
+    )
+    deadline = time.time() + IMAP_BOUNCE_WINDOW_SECONDS
+    processed_ids: set[bytes] = set()
+    try:
+        while time.time() < deadline:
+            with imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT) as mailbox:
+                mailbox.login(sender, password)
+                mailbox.select(IMAP_MAILBOX)
+                status, payload = mailbox.search(None, "ALL")
+                if status != "OK":
+                    raise RuntimeError("Não foi possível consultar a caixa IMAP.")
+                message_ids = payload[0].split()[-80:]
+                new_bounce_found = False
+                for message_id in message_ids:
+                    if message_id in processed_ids:
+                        continue
+                    processed_ids.add(message_id)
+                    fetch_status, parts = mailbox.fetch(message_id, "(RFC822)")
+                    if fetch_status != "OK":
+                        continue
+                    raw_message = b""
+                    for part in parts:
+                        if isinstance(part, tuple) and len(part) > 1:
+                            raw_message = part[1]
+                            break
+                    if not raw_message:
+                        continue
+                    parsed = BytesParser(policy=policy.default).parsebytes(raw_message)
+                    if not is_bounce_message(parsed):
+                        continue
+                    bounced = extract_bounced_recipients(parsed, accepted_recipients)
+                    if not bounced:
+                        continue
+                    detail = bounce_summary(parsed)
+                    for email_address in sorted(bounced):
+                        if email_address in seen_bounces:
+                            continue
+                        seen_bounces.add(email_address)
+                        record_report_row(job, email_address, "bounced_imap", detail)
+                        add_log(job, f"IMAP detectou retorno para {email_address}: {detail}")
+                        save_report(job)
+                        persist_campaign(job)
+                        new_bounce_found = True
+                mailbox.logout()
+            if time.time() >= deadline:
+                break
+            if not new_bounce_found:
+                time.sleep(max(15, IMAP_BOUNCE_POLL_SECONDS))
+        add_log(job, "Monitoramento de retornos por IMAP finalizado.")
+        save_report(job)
+        persist_campaign(job)
+    except Exception as exc:  # noqa: BLE001
+        add_log(job, f"Não foi possível monitorar retornos por IMAP: {exc}")
+        save_report(job)
+        persist_campaign(job)
 
 
 def build_scheduled_payload(
@@ -1828,6 +2003,7 @@ def run_job(
 ) -> None:
     sent_times: list[float] = []
     domain_times: dict[str, float] = {}
+    accepted_recipients: set[str] = set()
     suppression = load_suppression_list()
     context = ssl.create_default_context()
     add_log(job, f"Conectando ao servidor {SMTP_SERVER}:{SMTP_PORT}.")
@@ -1867,13 +2043,14 @@ def run_job(
 
                 try:
                     message = build_message(job.sender, recipient, job.subject, body, is_html, reply_to)
-                    smtp.send_message(message)
+                    delivery_detail = deliver_message_via_smtp(smtp, message)
                     sent_times.append(time.time())
                     domain_times[recipient_domain(recipient.email)] = time.time()
+                    accepted_recipients.add(recipient.email)
                     with JOB_LOCK:
                         job.sent += 1
-                    add_log(job, f"Enviado para {recipient.email} ({index}/{job.total}).")
-                    record_report_row(job, recipient.email, "sent", "Entregue ao servidor SMTP.")
+                    add_log(job, f"SMTP aceitou {recipient.email} ({index}/{job.total}) com retorno {delivery_detail}.")
+                    record_report_row(job, recipient.email, "accepted_smtp", f"Aceito pelo SMTP: {delivery_detail}")
                 except Exception as exc:  # noqa: BLE001
                     domain_times[recipient_domain(recipient.email)] = time.time()
                     with JOB_LOCK:
@@ -1899,8 +2076,8 @@ def run_job(
             if send_copy_to_self and not job.cancel_event.is_set():
                 copy_recipient = Recipient(email=job.sender, fields={"nome": "Remetente", "email": job.sender})
                 copy_message = build_message(job.sender, copy_recipient, f"[Cópia] {job.subject}", body, is_html, reply_to)
-                smtp.send_message(copy_message)
-                add_log(job, "Cópia final enviada para a conta remetente.")
+                copy_detail = deliver_message_via_smtp(smtp, copy_message)
+                add_log(job, f"Cópia final aceita pelo SMTP com retorno {copy_detail}.")
 
         with JOB_LOCK:
             job.current = ""
@@ -1908,6 +2085,13 @@ def run_job(
             job.status = "cancelled" if job.cancel_event.is_set() else "done"
         add_log(job, "Campanha cancelada." if job.cancel_event.is_set() else "Campanha concluída.")
         finish_job(job)
+        if not job.cancel_event.is_set() and accepted_recipients:
+            monitor_thread = threading.Thread(
+                target=monitor_bounces_via_imap,
+                args=(job, job.sender, password, accepted_recipients),
+                daemon=True,
+            )
+            monitor_thread.start()
     except Exception as exc:  # noqa: BLE001
         with JOB_LOCK:
             job.current = ""
