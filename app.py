@@ -954,7 +954,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="hint" id="globalRateHint">O ritmo de envio é definido globalmente pela área administrativa.</div>
           <div id="adminPanel" class="admin-panel hidden">
             <h3>Área administrativa</h3>
-            <form id="adminRateForm" class="grid">
+            <div id="adminRateForm" class="grid">
               <label>
                 Delay mínimo entre envios, em segundos
                 <input type="number" name="delay_min" min="1" max="3600" required>
@@ -975,7 +975,7 @@ INDEX_HTML = r"""<!doctype html>
                 Limite máximo por hora
                 <input type="number" name="max_per_hour" min="1" max="2000" required>
               </label>
-            </form>
+            </div>
             <div class="actions">
               <button type="button" id="saveAdminRateBtn">Salvar ritmo global</button>
               <span class="hint">Essas configurações passam a valer para todos os usuários e novas campanhas.</span>
@@ -1211,8 +1211,17 @@ INDEX_HTML = r"""<!doctype html>
       return payload;
     }
 
+    function buildAdminRateParams() {
+      const params = new URLSearchParams();
+      if (!adminRateForm) return params;
+      adminRateForm.querySelectorAll("input[name]").forEach((input) => {
+        params.set(input.name, input.value);
+      });
+      return params;
+    }
+
     saveAdminRateBtn?.addEventListener("click", async () => {
-      const params = new URLSearchParams(new FormData(adminRateForm));
+      const params = buildAdminRateParams();
       const response = await fetch("/api/admin/config", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
