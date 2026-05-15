@@ -3,9 +3,33 @@ services:
     build:
       context: .
     container_name: mala-direta-tceal
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8086:8086"
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8086
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mala_direta
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
+  postgres:
+    image: postgres:17
+    container_name: mala-direta-postgres
+    environment:
+      POSTGRES_DB: mala_direta
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mala_direta"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

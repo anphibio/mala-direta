@@ -1,8 +1,10 @@
 # Mala Direta TCE/AL
 
-Aplicação local para envio de mala direta usando o SMTP `smtp.tceal.tc.br:587` com STARTTLS.
+Aplicação de mala direta usando `FastAPI` no backend e `PostgreSQL 17` como banco principal, com envio via SMTP `smtp.tceal.tc.br:587` usando STARTTLS.
 
 ## Como abrir localmente
+
+Defina um `DATABASE_URL` apontando para o PostgreSQL e rode:
 
 ```bash
 python3 app.py
@@ -47,7 +49,12 @@ docker build -t mala-direta-tceal .
 docker run --rm -p 8086:8086 --name mala-direta-tceal mala-direta-tceal
 ```
 
-O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
+O `compose` já sobe com:
+
+- aplicação `FastAPI`
+- banco `PostgreSQL 17`
+- persistência do banco em volume Docker
+- pasta local `data/` montada no container para relatórios, chave da aplicação e migração do SQLite legado
 
 ## Recursos
 
@@ -65,17 +72,27 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 - Retry assistido apenas com os e-mails que falharam no envio, com edição manual antes do reenvio.
 - Lista de supressão para falhas permanentes.
 - Monitoramento de retornos por IMAP após o envio, para detectar bounces no Zimbra.
-- Banco SQLite local em `data/mala_direta.db` para persistir histórico e supressões.
+- Banco principal em `PostgreSQL 17`.
+- Migração automática inicial a partir do `data/mala_direta.db`, quando esse arquivo existir e o PostgreSQL ainda estiver vazio.
 - Chave local em `data/app.key` para cifrar a senha das campanhas agendadas.
 - Validação e remoção de e-mails duplicados antes do envio.
 - Senha mantida em memória para envios imediatos e armazenada cifrada apenas quando a campanha é agendada.
 
 ## Persistência
 
+- O banco principal agora é o PostgreSQL definido em `DATABASE_URL`.
 - Campanhas agendadas ficam salvas no banco e são recuperadas quando a aplicação reinicia.
 - A senha usada nessas campanhas é armazenada cifrada localmente.
 - Se quiser controlar a cifra com uma chave definida por você, configure `APP_MASTER_KEY` no ambiente antes de subir a aplicação.
 - O monitoramento IMAP usa, por padrão, `IMAP_SERVER=smtp.tceal.tc.br`, `IMAP_PORT=993`, caixa `INBOX`, janela de 900 segundos e intervalo de 60 segundos. Esses valores podem ser ajustados por ambiente.
+
+## Stack atual
+
+- Backend: `FastAPI`
+- Servidor ASGI: `uvicorn`
+- Banco: `PostgreSQL 17`
+- Driver PostgreSQL: `psycopg 3`
+- Frontend: HTML/CSS/JavaScript servido pela própria aplicação
 
 ## CSV esperado
 

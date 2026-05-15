@@ -25,11 +25,17 @@ from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import psycopg
+import uvicorn
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response as FastAPIResponse
+from psycopg.rows import dict_row
 
 
 SMTP_SERVER = "smtp.tceal.tc.br"
@@ -43,6 +49,7 @@ IMAP_BOUNCE_POLL_SECONDS = int(os.getenv("IMAP_BOUNCE_POLL_SECONDS", "60"))
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8086"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Maceio")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/mala_direta")
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 REPORTS_DIR = DATA_DIR / "reports"
@@ -1408,6 +1415,21 @@ def create_session(sender: str, password: str) -> str:
     return token
 
 
+def upsert_user(email_address: str) -> None:
+    now = time.time()
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (email, created_at, last_login_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (email) DO UPDATE SET
+                last_login_at = EXCLUDED.last_login_at
+            """,
+            (email_address, now, now),
+        )
+        connection.commit()
+
+
 def get_session(session_id: str) -> dict[str, Any] | None:
     if not session_id:
         return None
@@ -1426,9 +1448,8 @@ def delete_session(session_id: str) -> None:
         SESSIONS.pop(session_id, None)
 
 
-def db_connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
+def db_connect() -> psycopg.Connection:
+    connection = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     return connection
 
 
@@ -1479,7 +1500,7 @@ def decrypt_secret(token: str) -> str:
 
 def init_database() -> None:
     with DB_LOCK, db_connect() as connection:
-        connection.executescript(
+        connection.execute(
             """
             CREATE TABLE IF NOT EXISTS campaigns (
                 id TEXT PRIMARY KEY,
@@ -1490,29 +1511,33 @@ def init_database() -> None:
                 sent INTEGER NOT NULL,
                 failed INTEGER NOT NULL,
                 skipped INTEGER NOT NULL,
-                created_at REAL NOT NULL,
-                scheduled_for REAL,
-                finished_at REAL,
+                created_at DOUBLE PRECISION NOT NULL,
+                scheduled_for DOUBLE PRECISION,
+                finished_at DOUBLE PRECISION,
                 report_path TEXT,
                 payload_json TEXT,
                 encrypted_password TEXT
-            );
-
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS suppression_list (
                 email TEXT PRIMARY KEY,
                 reason TEXT NOT NULL,
                 created_at TEXT NOT NULL
-            );
+            )
             """
         )
-        existing_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()
-        }
-        if "payload_json" not in existing_columns:
-            connection.execute("ALTER TABLE campaigns ADD COLUMN payload_json TEXT")
-        if "encrypted_password" not in existing_columns:
-            connection.execute("ALTER TABLE campaigns ADD COLUMN encrypted_password TEXT")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                created_at DOUBLE PRECISION NOT NULL,
+                last_login_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
         connection.commit()
     migrate_legacy_storage()
 
@@ -1520,15 +1545,29 @@ def init_database() -> None:
 def migrate_legacy_storage() -> None:
     legacy_history = read_json_file(LEGACY_HISTORY_FILE, [])
     legacy_suppression = read_json_file(LEGACY_SUPPRESSION_FILE, {})
-    if not legacy_history and not legacy_suppression:
-        return
+    sqlite_exists = DB_PATH.exists()
     with DB_LOCK, db_connect() as connection:
+        has_campaigns = connection.execute("SELECT id FROM campaigns LIMIT 1").fetchone() is not None
+        if has_campaigns:
+            return
         for item in legacy_history:
             connection.execute(
                 """
-                INSERT OR REPLACE INTO campaigns
+                INSERT INTO campaigns
                 (id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    sender = EXCLUDED.sender,
+                    subject = EXCLUDED.subject,
+                    status = EXCLUDED.status,
+                    total = EXCLUDED.total,
+                    sent = EXCLUDED.sent,
+                    failed = EXCLUDED.failed,
+                    skipped = EXCLUDED.skipped,
+                    created_at = EXCLUDED.created_at,
+                    scheduled_for = EXCLUDED.scheduled_for,
+                    finished_at = EXCLUDED.finished_at,
+                    report_path = EXCLUDED.report_path
                 """,
                 (
                     item.get("id", str(uuid.uuid4())),
@@ -1547,13 +1586,73 @@ def migrate_legacy_storage() -> None:
             )
         for email_address, payload in legacy_suppression.items():
             connection.execute(
-                "INSERT OR REPLACE INTO suppression_list (email, reason, created_at) VALUES (?, ?, ?)",
+                """
+                INSERT INTO suppression_list (email, reason, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (email) DO UPDATE SET
+                    reason = EXCLUDED.reason,
+                    created_at = EXCLUDED.created_at
+                """,
                 (
                     email_address.lower(),
                     payload.get("reason", "Lista migrada"),
                     payload.get("created_at", format_timestamp(time.time())),
                 ),
             )
+        if sqlite_exists:
+            with sqlite3.connect(DB_PATH) as sqlite_conn:
+                sqlite_conn.row_factory = sqlite3.Row
+                sqlite_campaigns = sqlite_conn.execute("SELECT * FROM campaigns").fetchall()
+                sqlite_suppressions = sqlite_conn.execute("SELECT * FROM suppression_list").fetchall()
+            for row in sqlite_campaigns:
+                connection.execute(
+                    """
+                    INSERT INTO campaigns
+                    (id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path, payload_json, encrypted_password)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        sender = EXCLUDED.sender,
+                        subject = EXCLUDED.subject,
+                        status = EXCLUDED.status,
+                        total = EXCLUDED.total,
+                        sent = EXCLUDED.sent,
+                        failed = EXCLUDED.failed,
+                        skipped = EXCLUDED.skipped,
+                        created_at = EXCLUDED.created_at,
+                        scheduled_for = EXCLUDED.scheduled_for,
+                        finished_at = EXCLUDED.finished_at,
+                        report_path = EXCLUDED.report_path,
+                        payload_json = EXCLUDED.payload_json,
+                        encrypted_password = EXCLUDED.encrypted_password
+                    """,
+                    (
+                        row["id"],
+                        row["sender"],
+                        row["subject"],
+                        row["status"],
+                        int(row["total"]),
+                        int(row["sent"]),
+                        int(row["failed"]),
+                        int(row["skipped"]),
+                        float(row["created_at"]),
+                        row["scheduled_for"],
+                        row["finished_at"],
+                        row["report_path"] or "",
+                        row["payload_json"],
+                        row["encrypted_password"],
+                    ),
+                )
+            for row in sqlite_suppressions:
+                connection.execute(
+                    """
+                    INSERT INTO suppression_list (email, reason, created_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (email) DO UPDATE SET
+                        reason = EXCLUDED.reason,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    (row["email"], row["reason"], row["created_at"]),
+                )
         connection.commit()
     if LEGACY_HISTORY_FILE.exists():
         LEGACY_HISTORY_FILE.unlink()
@@ -1568,7 +1667,7 @@ def load_history(sender_filter: str | None = None) -> list[dict[str, Any]]:
     """
     params: tuple[Any, ...] = ()
     if sender_filter:
-        query += " WHERE sender = ?"
+        query += " WHERE sender = %s"
         params = (sender_filter,)
     query += " ORDER BY created_at DESC LIMIT 50"
     with DB_LOCK, db_connect() as connection:
@@ -1650,7 +1749,7 @@ def cancel_campaign_by_id(campaign_id: str) -> bool:
         return True
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
-            "SELECT id, status FROM campaigns WHERE id = ?",
+            "SELECT id, status FROM campaigns WHERE id = %s",
             (campaign_id,),
         ).fetchone()
         if not row or row["status"] not in {"running", "paused", "scheduled"}:
@@ -1658,8 +1757,8 @@ def cancel_campaign_by_id(campaign_id: str) -> bool:
         connection.execute(
             """
             UPDATE campaigns
-            SET status = 'cancelled', finished_at = ?, payload_json = NULL, encrypted_password = NULL
-            WHERE id = ?
+            SET status = 'cancelled', finished_at = %s, payload_json = NULL, encrypted_password = NULL
+            WHERE id = %s
             """,
             (time.time(), campaign_id),
         )
@@ -1676,8 +1775,8 @@ def persist_scheduled_payload(
         connection.execute(
             """
             UPDATE campaigns
-            SET payload_json = ?, encrypted_password = ?
-            WHERE id = ?
+            SET payload_json = %s, encrypted_password = %s
+            WHERE id = %s
             """,
             (json.dumps(payload, ensure_ascii=False), encrypt_secret(password), job_id),
         )
@@ -1687,7 +1786,7 @@ def persist_scheduled_payload(
 def clear_scheduled_payload(job_id: str) -> None:
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            "UPDATE campaigns SET payload_json = NULL, encrypted_password = NULL WHERE id = ?",
+            "UPDATE campaigns SET payload_json = NULL, encrypted_password = NULL WHERE id = %s",
             (job_id,),
         )
         connection.commit()
@@ -1776,19 +1875,19 @@ def persist_campaign(job: MailJob) -> None:
             """
             INSERT INTO campaigns
             (id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path, payload_json, encrypted_password)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT payload_json FROM campaigns WHERE id = ?), NULL), COALESCE((SELECT encrypted_password FROM campaigns WHERE id = ?), NULL))
-            ON CONFLICT(id) DO UPDATE SET
-                sender=excluded.sender,
-                subject=excluded.subject,
-                status=excluded.status,
-                total=excluded.total,
-                sent=excluded.sent,
-                failed=excluded.failed,
-                skipped=excluded.skipped,
-                created_at=excluded.created_at,
-                scheduled_for=excluded.scheduled_for,
-                finished_at=excluded.finished_at,
-                report_path=excluded.report_path
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE((SELECT payload_json FROM campaigns WHERE id = %s), NULL), COALESCE((SELECT encrypted_password FROM campaigns WHERE id = %s), NULL))
+            ON CONFLICT (id) DO UPDATE SET
+                sender = EXCLUDED.sender,
+                subject = EXCLUDED.subject,
+                status = EXCLUDED.status,
+                total = EXCLUDED.total,
+                sent = EXCLUDED.sent,
+                failed = EXCLUDED.failed,
+                skipped = EXCLUDED.skipped,
+                created_at = EXCLUDED.created_at,
+                scheduled_for = EXCLUDED.scheduled_for,
+                finished_at = EXCLUDED.finished_at,
+                report_path = EXCLUDED.report_path
             """,
             (
                 job.id,
@@ -1815,10 +1914,10 @@ def add_suppression(email_address: str, reason: str) -> None:
         connection.execute(
             """
             INSERT INTO suppression_list (email, reason, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET
-                reason=excluded.reason,
-                created_at=excluded.created_at
+            VALUES (%s, %s, %s)
+            ON CONFLICT (email) DO UPDATE SET
+                reason = EXCLUDED.reason,
+                created_at = EXCLUDED.created_at
             """,
             (
                 email_address.lower(),
@@ -3051,12 +3150,343 @@ class MailerHandler(BaseHTTPRequestHandler):
         return
 
 
-def main() -> None:
+async def request_formdata(request: Request) -> FormData:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        raise HTTPException(status_code=400, detail="Envie os dados do formulário corretamente.")
+    raw_body = await request.body()
+    return parse_multipart_form(raw_body, content_type)
+
+
+def get_request_session(request: Request) -> tuple[str, dict[str, Any] | None]:
+    session_id = parse_cookie_header(request.headers.get("cookie", "")).get("md_session", "")
+    return session_id, get_session(session_id)
+
+
+def require_request_session(request: Request) -> dict[str, Any]:
+    _, session = get_request_session(request)
+    if not session:
+        raise HTTPException(status_code=401, detail="Sua sessão expirou. Entre novamente.")
+    return session
+
+
+app = FastAPI(title="Mala Direta TCE/AL")
+
+
+@app.on_event("startup")
+def startup_event() -> None:
     init_database()
     restore_scheduled_campaigns()
-    httpd = ThreadingHTTPServer((APP_HOST, APP_PORT), MailerHandler)
-    print(f"Mala Direta TCE/AL aberta em http://{APP_HOST}:{APP_PORT}")
-    httpd.serve_forever()
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code)
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse({"error": f"Erro inesperado: {exc}"}, status_code=500)
+
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request) -> HTMLResponse:
+    _, session = get_request_session(request)
+    return HTMLResponse(INDEX_HTML if session else LOGIN_HTML)
+
+
+@app.get("/index.html", response_class=HTMLResponse)
+def index_alias(request: Request) -> HTMLResponse:
+    return home(request)
+
+
+@app.get("/api/me")
+def api_me(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    return JSONResponse({"sender": session["sender"]})
+
+
+@app.get("/api/status")
+def api_status(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    return JSONResponse(job_snapshot(session["sender"]))
+
+
+@app.get("/api/history")
+def api_history(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    return JSONResponse(
+        {
+            "items": load_history(session["sender"])[:10],
+            "active_items": load_active_campaigns(session["sender"]),
+            "suppression_count": suppression_count(),
+        }
+    )
+
+
+@app.get("/api/report")
+def api_report(request: Request, id: str) -> FastAPIResponse:
+    session = require_request_session(request)
+    user_campaign_ids = {item["id"] for item in load_history(session["sender"])}
+    if id not in user_campaign_ids:
+        raise HTTPException(status_code=403, detail="Relatório não pertence ao usuário autenticado.")
+    report_path = REPORTS_DIR / f"{id}.csv"
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Relatório não encontrado.")
+    return FastAPIResponse(
+        content=report_path.read_bytes(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="relatorio-{id}.csv"'},
+    )
+
+
+@app.get("/api/retry-source")
+def api_retry_source(request: Request, id: str) -> JSONResponse:
+    session = require_request_session(request)
+    user_campaign_ids = {item["id"] for item in load_history(session["sender"])}
+    if id not in user_campaign_ids:
+        raise HTTPException(status_code=403, detail="Essa campanha não pertence ao usuário autenticado.")
+    recipients = load_failed_recipients_from_report(id)
+    if not recipients:
+        raise HTTPException(status_code=404, detail="Essa campanha não tem e-mails com falha para retry.")
+    return JSONResponse({"campaign_id": id, "recipients": recipients})
+
+
+@app.post("/api/login")
+async def api_login(request: Request) -> JSONResponse:
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    sender = clean_username(parsed.get("username", [""])[0])
+    password = parsed.get("password", [""])[0]
+    if not password:
+        raise HTTPException(status_code=400, detail="Informe a senha do e-mail.")
+    try:
+        smtp_login_check(sender, password)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=friendly_send_error(exc)) from exc
+    upsert_user(sender)
+    session_id = create_session(sender, password)
+    response = JSONResponse({"ok": True, "sender": sender})
+    response.set_cookie("md_session", session_id, httponly=True, samesite="lax", path="/")
+    return response
+
+
+@app.post("/api/logout")
+def api_logout(request: Request) -> JSONResponse:
+    session_id, _ = get_request_session(request)
+    delete_session(session_id)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("md_session", path="/")
+    return response
+
+
+@app.post("/api/preview")
+async def api_preview(request: Request) -> JSONResponse:
+    require_request_session(request)
+    fields = await request_formdata(request)
+    recipients, invalid = parse_recipients(fields)
+    delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
+    delay_max = as_int(field_value(fields, "delay_max"), 45, 1, 3600)
+    if delay_min > delay_max:
+        delay_min, delay_max = delay_max, delay_min
+    batch_size = as_int(field_value(fields, "batch_size"), 25, 0, 500)
+    batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
+    max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
+    scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
+    estimate = build_campaign_estimate(
+        recipients,
+        delay_min,
+        delay_max,
+        batch_size,
+        batch_pause,
+        max_per_hour,
+        start_at=scheduled_for or time.time(),
+    )
+    return JSONResponse(
+        {
+            "valid": len(recipients),
+            "invalid": invalid,
+            "sample": [recipient.email for recipient in recipients[:8]],
+            "estimate": estimate,
+        }
+    )
+
+
+@app.post("/api/start")
+async def api_start(request: Request) -> JSONResponse:
+    global CURRENT_JOB
+    session = require_request_session(request)
+
+    with JOB_LOCK:
+        if CURRENT_JOB and CURRENT_JOB.status in {"running", "paused", "scheduled"}:
+            raise HTTPException(status_code=400, detail="Já existe uma campanha em andamento. Pause, cancele ou aguarde terminar.")
+    if has_active_campaign():
+        raise HTTPException(status_code=400, detail="Já existe uma campanha ativa ou agendada. Conclua ou cancele antes de criar outra.")
+
+    fields = await request_formdata(request)
+    sender = session["sender"]
+    password = session["password"]
+    recipients, invalid = parse_recipients(fields)
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Nenhum e-mail válido foi encontrado.")
+
+    subject = field_value(fields, "subject").strip()
+    is_html = parse_bool(field_value(fields, "is_html"))
+    body = field_value(fields, "body_html" if is_html else "body").strip()
+    attachment = attachment_from_form(fields)
+    if is_html:
+        body = sanitize_html(body)
+    if not subject or not body:
+        raise HTTPException(status_code=400, detail="Informe assunto e corpo da mensagem.")
+
+    delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
+    delay_max = as_int(field_value(fields, "delay_max"), 45, 1, 3600)
+    if delay_min > delay_max:
+        delay_min, delay_max = delay_max, delay_min
+    batch_size = as_int(field_value(fields, "batch_size"), 25, 0, 500)
+    batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
+    max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
+    reply_to = field_value(fields, "reply_to").strip()
+    scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
+    if reply_to and not EMAIL_RE.match(reply_to):
+        raise HTTPException(status_code=400, detail="O campo Responder para precisa ser um e-mail válido.")
+    if scheduled_for and scheduled_for <= time.time():
+        scheduled_for = None
+
+    job = MailJob(
+        id=str(uuid.uuid4()),
+        sender=sender,
+        total=len(recipients),
+        subject=subject,
+        status="scheduled" if scheduled_for else "running",
+        skipped=invalid,
+        scheduled_for=scheduled_for,
+    )
+    estimate = build_campaign_estimate(
+        recipients,
+        delay_min,
+        delay_max,
+        batch_size,
+        batch_pause,
+        max_per_hour,
+        start_at=scheduled_for or time.time(),
+    )
+    job.estimated_duration_seconds = int(estimate["duration_seconds"])
+    job.estimated_end_at = float(estimate["finish_at"])
+    with JOB_LOCK:
+        CURRENT_JOB = job
+    add_log(
+        job,
+        "Campanha criada. Preparando autenticação e fila de envio."
+        if not scheduled_for
+        else f"Campanha criada e agendada para {format_timestamp(scheduled_for)}.",
+    )
+    persist_campaign(job)
+    if invalid:
+        add_log(job, f"{invalid} item(ns) inválido(s) ou duplicado(s) foram ignorados.")
+
+    thread = threading.Thread(
+        target=run_scheduled_job if scheduled_for else run_job,
+        args=(
+            job,
+            password,
+            recipients,
+            body,
+            is_html,
+            reply_to,
+            delay_min,
+            delay_max,
+            batch_size,
+            batch_pause,
+            max_per_hour,
+            parse_bool(field_value(fields, "send_copy_to_self")),
+            attachment,
+        ),
+        daemon=True,
+    )
+    if scheduled_for:
+        persist_scheduled_payload(
+            job.id,
+            build_scheduled_payload(
+                recipients,
+                body,
+                is_html,
+                reply_to,
+                delay_min,
+                delay_max,
+                batch_size,
+                batch_pause,
+                max_per_hour,
+                parse_bool(field_value(fields, "send_copy_to_self")),
+                attachment,
+            ),
+            password,
+        )
+    thread.start()
+    return JSONResponse({"ok": True, "job_id": job.id, "job": job_snapshot(sender)})
+
+
+@app.post("/api/pause")
+def api_pause(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    should_log = False
+    with JOB_LOCK:
+        job = CURRENT_JOB
+        if job and job.sender == session["sender"] and job.status == "running":
+            job.pause_event.set()
+            job.status = "paused"
+            job.next_send_at = None
+            should_log = True
+    if should_log and job:
+        add_log(job, "Pausa solicitada pelo usuário.")
+        persist_campaign(job)
+    return JSONResponse(job_snapshot(session["sender"]))
+
+
+@app.post("/api/resume")
+def api_resume(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    should_log = False
+    with JOB_LOCK:
+        job = CURRENT_JOB
+        if job and job.sender == session["sender"] and job.status == "paused":
+            job.pause_event.clear()
+            job.status = "running"
+            should_log = True
+    if should_log and job:
+        add_log(job, "Envio retomado pelo usuário.")
+        persist_campaign(job)
+    return JSONResponse(job_snapshot(session["sender"]))
+
+
+@app.post("/api/cancel")
+def api_cancel(request: Request, id: str = "") -> JSONResponse:
+    session = require_request_session(request)
+    campaign_id = id
+    if not campaign_id:
+        with JOB_LOCK:
+            job = CURRENT_JOB
+            campaign_id = job.id if job and job.sender == session["sender"] and job.status in {"running", "paused", "scheduled"} else ""
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="Nenhuma campanha em andamento foi encontrada para cancelar.")
+    allowed_ids = {item["id"] for item in load_history(session["sender"])}
+    if campaign_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="Essa campanha não pertence ao usuário autenticado.")
+    if not cancel_campaign_by_id(campaign_id):
+        raise HTTPException(status_code=400, detail="Não foi possível cancelar a campanha informada.")
+    return JSONResponse(
+        {
+            "ok": True,
+            "job": job_snapshot(session["sender"]),
+            "active_items": load_active_campaigns(session["sender"]),
+            "items": load_history(session["sender"])[:10],
+            "suppression_count": suppression_count(),
+        }
+    )
+
+
+def main() -> None:
+    uvicorn.run(app, host=APP_HOST, port=APP_PORT)
 
 
 if __name__ == "__main__":
