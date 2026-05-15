@@ -2,9 +2,39 @@
 
 Aplicação de mala direta usando `FastAPI` no backend e `PostgreSQL 17` como banco principal, com envio via SMTP `smtp.tceal.tc.br:587` usando STARTTLS.
 
+## Configuração por `.env`
+
+Crie um arquivo `.env` na raiz do projeto. Exemplo:
+
+```env
+APP_HOST=0.0.0.0
+APP_PORT=8086
+APP_TIMEZONE=America/Maceio
+
+POSTGRES_DB=mala_direta
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mala_direta
+
+ADMIN_EMAILS=admin@tceal.tc.br,fulano@tceal.tc.br
+APP_MASTER_KEY=
+
+IMAP_SERVER=smtp.tceal.tc.br
+IMAP_PORT=993
+IMAP_MAILBOX=INBOX
+IMAP_BOUNCE_WINDOW_SECONDS=900
+IMAP_BOUNCE_POLL_SECONDS=60
+```
+
+Com isso:
+
+- o `docker compose` passa a ler o `.env`
+- a aplicação também lê o `.env` quando roda fora do Docker
+- a lista de administradores fica centralizada em `ADMIN_EMAILS`
+
 ## Como abrir localmente
 
-Defina um `DATABASE_URL` apontando para o PostgreSQL e rode:
+Com o `.env` pronto e um `DATABASE_URL` válido, rode:
 
 ```bash
 python3 app.py

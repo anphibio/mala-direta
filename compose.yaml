@@ -3,27 +3,39 @@ services:
     build:
       context: .
     container_name: mala-direta-tceal
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "8086:8086"
+      - "${APP_PORT:-8086}:${APP_PORT:-8086}"
     environment:
-      APP_HOST: 0.0.0.0
-      APP_PORT: 8086
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mala_direta
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8086}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Maceio}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/mala_direta}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-admin@tceal.tc.br}
+      APP_MASTER_KEY: ${APP_MASTER_KEY:-}
+      IMAP_SERVER: ${IMAP_SERVER:-smtp.tceal.tc.br}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_MAILBOX: ${IMAP_MAILBOX:-INBOX}
+      IMAP_BOUNCE_WINDOW_SECONDS: ${IMAP_BOUNCE_WINDOW_SECONDS:-900}
+      IMAP_BOUNCE_POLL_SECONDS: ${IMAP_BOUNCE_POLL_SECONDS:-60}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
   postgres:
     image: postgres:17
     container_name: mala-direta-postgres
+    env_file:
+      - .env
     environment:
-      POSTGRES_DB: mala_direta
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-mala_direta}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d mala_direta"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-mala_direta}"]
       interval: 10s
       timeout: 5s
       retries: 5

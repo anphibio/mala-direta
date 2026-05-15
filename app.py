@@ -33,9 +33,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response as FastAPIResponse
 from psycopg.rows import dict_row
+
+load_dotenv()
 
 
 SMTP_SERVER = "smtp.tceal.tc.br"
