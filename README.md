@@ -53,6 +53,7 @@ O container já sobe com `APP_HOST=0.0.0.0` e `APP_PORT=8086`.
 
 - Login com usuário `@tceal.tc.br` pré-fixado.
 - Importação de destinatários por CSV, TXT ou digitação manual.
+- Upload de anexo para envio junto com a campanha.
 - CSV com personalização por colunas, usando marcadores como `{{nome}}`, `{{email}}` e `{{cargo}}`.
 - Delay aleatório entre entregas.
 - Pausa automática por lote.

@@ -5,6 +5,7 @@ import html
 import imaplib
 import io
 import json
+import mimetypes
 import os
 import random
 import re
@@ -83,6 +84,13 @@ class Recipient:
 @dataclass
 class FormFile:
     filename: str
+    value: bytes
+
+
+@dataclass
+class AttachmentFile:
+    filename: str
+    content_type: str
     value: bytes
 
 
@@ -898,6 +906,11 @@ INDEX_HTML = r"""<!doctype html>
             <textarea name="body_html" id="htmlBodyValue" class="hidden"></textarea>
             <div class="hint">Use a barra para aplicar estilos, alinhamento, cores, links, imagens e alternar entre visualização visual e HTML. As variáveis como {{nome}} continuam funcionando.</div>
           </div>
+          <label>
+            Anexo
+            <input type="file" name="attachment_file">
+          </label>
+          <div class="hint">Você pode anexar um arquivo para acompanhar a campanha. O mesmo anexo será enviado para todos os destinatários.</div>
         </div>
 
         <div>
@@ -1980,6 +1993,19 @@ def field_value(fields: FormData, name: str, default: str = "") -> str:
     return str(values[0] if values[0] is not None else default)
 
 
+def attachment_from_form(fields: FormData) -> AttachmentFile | None:
+    file_item = fields.files.get("attachment_file")
+    if file_item is None or not file_item.filename or not file_item.value:
+        return None
+    guessed_type, _ = mimetypes.guess_type(file_item.filename)
+    content_type = guessed_type or "application/octet-stream"
+    return AttachmentFile(
+        filename=file_item.filename,
+        content_type=content_type,
+        value=file_item.value,
+    )
+
+
 def parse_schedule(value: str) -> float | None:
     raw_value = (value or "").strip()
     if not raw_value:
@@ -2073,6 +2099,7 @@ def build_message(
     body: str,
     is_html: bool,
     reply_to: str,
+    attachment: AttachmentFile | None = None,
 ) -> EmailMessage:
     message = EmailMessage()
     message["From"] = sender
@@ -2086,6 +2113,16 @@ def build_message(
         message.add_alternative(rendered_body, subtype="html")
     else:
         message.set_content(rendered_body)
+    if attachment:
+        maintype, subtype = (attachment.content_type.split("/", 1) + ["octet-stream"])[:2]
+        if "/" not in attachment.content_type:
+            maintype, subtype = "application", "octet-stream"
+        message.add_attachment(
+            attachment.value,
+            maintype=maintype,
+            subtype=subtype,
+            filename=attachment.filename,
+        )
     return message
 
 
@@ -2327,6 +2364,7 @@ def build_scheduled_payload(
     batch_pause: int,
     max_per_hour: int,
     send_copy_to_self: bool,
+    attachment: AttachmentFile | None,
 ) -> dict[str, Any]:
     return {
         "recipients": [{"email": item.email, "fields": item.fields} for item in recipients],
@@ -2339,6 +2377,13 @@ def build_scheduled_payload(
         "batch_pause": batch_pause,
         "max_per_hour": max_per_hour,
         "send_copy_to_self": send_copy_to_self,
+        "attachment": {
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+            "value_b64": base64.b64encode(attachment.value).decode("ascii"),
+        }
+        if attachment
+        else None,
     }
 
 
@@ -2373,6 +2418,14 @@ def restore_scheduled_campaigns() -> None:
         Recipient(email=item["email"], fields=item.get("fields", {}))
         for item in payload.get("recipients", [])
     ]
+    attachment_payload = payload.get("attachment")
+    attachment = None
+    if attachment_payload and attachment_payload.get("filename") and attachment_payload.get("value_b64"):
+        attachment = AttachmentFile(
+            filename=attachment_payload["filename"],
+            content_type=attachment_payload.get("content_type", "application/octet-stream"),
+            value=base64.b64decode(attachment_payload["value_b64"].encode("ascii")),
+        )
     password = decrypt_secret(pending["encrypted_password"])
     thread = threading.Thread(
         target=run_scheduled_job,
@@ -2389,6 +2442,7 @@ def restore_scheduled_campaigns() -> None:
             int(payload.get("batch_pause", 300)),
             int(payload.get("max_per_hour", 90)),
             bool(payload.get("send_copy_to_self", True)),
+            attachment,
         ),
         daemon=True,
     )
@@ -2414,6 +2468,7 @@ def run_scheduled_job(
     batch_pause: int,
     max_per_hour: int,
     send_copy_to_self: bool,
+    attachment: AttachmentFile | None,
 ) -> None:
     if job.scheduled_for:
         wait_seconds = int(max(0, job.scheduled_for - time.time()))
@@ -2447,6 +2502,7 @@ def run_scheduled_job(
         batch_pause,
         max_per_hour,
         send_copy_to_self,
+        attachment,
     )
 
 
@@ -2463,6 +2519,7 @@ def run_job(
     batch_pause: int,
     max_per_hour: int,
     send_copy_to_self: bool,
+    attachment: AttachmentFile | None,
 ) -> None:
     sent_times: list[float] = []
     domain_times: dict[str, float] = {}
@@ -2506,7 +2563,7 @@ def run_job(
                     break
 
                 try:
-                    message = build_message(job.sender, recipient, job.subject, body, is_html, reply_to)
+                    message = build_message(job.sender, recipient, job.subject, body, is_html, reply_to, attachment)
                     delivery_detail = deliver_message_via_smtp(smtp, message)
                     sent_times.append(time.time())
                     domain_times[recipient_domain(recipient.email)] = time.time()
@@ -2539,7 +2596,7 @@ def run_job(
 
             if send_copy_to_self and not job.cancel_event.is_set():
                 copy_recipient = Recipient(email=job.sender, fields={"nome": "Remetente", "email": job.sender})
-                copy_message = build_message(job.sender, copy_recipient, f"[Cópia] {job.subject}", body, is_html, reply_to)
+                copy_message = build_message(job.sender, copy_recipient, f"[Cópia] {job.subject}", body, is_html, reply_to, attachment)
                 copy_detail = deliver_message_via_smtp(smtp, copy_message)
                 add_log(job, f"Cópia final aceita pelo SMTP com retorno {copy_detail}.")
 
@@ -2804,6 +2861,7 @@ class MailerHandler(BaseHTTPRequestHandler):
         subject = field_value(fields, "subject").strip()
         is_html = parse_bool(field_value(fields, "is_html"))
         body = field_value(fields, "body_html" if is_html else "body").strip()
+        attachment = attachment_from_form(fields)
         if is_html:
             body = sanitize_html(body)
         if not subject or not body:
@@ -2870,6 +2928,7 @@ class MailerHandler(BaseHTTPRequestHandler):
                 batch_pause,
                 max_per_hour,
                 parse_bool(field_value(fields, "send_copy_to_self")),
+                attachment,
             ),
             daemon=True,
         )
@@ -2887,6 +2946,7 @@ class MailerHandler(BaseHTTPRequestHandler):
                     batch_pause,
                     max_per_hour,
                     parse_bool(field_value(fields, "send_copy_to_self")),
+                    attachment,
                 ),
                 password,
             )
