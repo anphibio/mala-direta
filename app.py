@@ -50,6 +50,11 @@ APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8086"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Maceio")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/mala_direta")
+ADMIN_EMAILS = {
+    item.strip().lower()
+    for item in os.getenv("ADMIN_EMAILS", "admin@tceal.tc.br").split(",")
+    if item.strip()
+}
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 REPORTS_DIR = DATA_DIR / "reports"
@@ -404,6 +409,17 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
       font-size: 14px;
       font-weight: 700;
+    }
+    .admin-panel {
+      margin-top: 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfcfe;
+    }
+    .admin-panel h3 {
+      margin: 0 0 12px;
+      font-size: 15px;
     }
     main {
       max-width: 1220px;
@@ -921,28 +937,8 @@ INDEX_HTML = r"""<!doctype html>
         </div>
 
         <div>
-          <p class="panel-title">Ritmo de envio</p>
+          <p class="panel-title">Preferências da campanha</p>
           <div class="grid">
-            <label>
-              Delay mínimo entre envios, em segundos
-              <input type="number" name="delay_min" min="1" max="3600" value="20" required>
-            </label>
-            <label>
-              Delay máximo entre envios, em segundos
-              <input type="number" name="delay_max" min="1" max="3600" value="45" required>
-            </label>
-            <label>
-              Pausa a cada quantos envios
-              <input type="number" name="batch_size" min="0" max="500" value="25">
-            </label>
-            <label>
-              Duração da pausa do lote, em segundos
-              <input type="number" name="batch_pause" min="0" max="7200" value="300">
-            </label>
-            <label>
-              Limite máximo por hora
-              <input type="number" name="max_per_hour" min="1" max="2000" value="90" required>
-            </label>
             <label>
               Responder para
               <input type="email" name="reply_to" placeholder="opcional@tceal.tc.br">
@@ -952,7 +948,36 @@ INDEX_HTML = r"""<!doctype html>
               <input type="datetime-local" name="schedule_at">
             </label>
           </div>
-          <div class="hint">Use valores conservadores para contas Microsoft. O sistema aplica delay aleatório, pausa por lote, teto por hora e espaçamento extra automático para domínios Microsoft.</div>
+          <div class="hint" id="globalRateHint">O ritmo de envio é definido globalmente pela área administrativa.</div>
+          <div id="adminPanel" class="admin-panel hidden">
+            <h3>Área administrativa</h3>
+            <form id="adminRateForm" class="grid">
+              <label>
+                Delay mínimo entre envios, em segundos
+                <input type="number" name="delay_min" min="1" max="3600" required>
+              </label>
+              <label>
+                Delay máximo entre envios, em segundos
+                <input type="number" name="delay_max" min="1" max="3600" required>
+              </label>
+              <label>
+                Pausa a cada quantos envios
+                <input type="number" name="batch_size" min="0" max="500">
+              </label>
+              <label>
+                Duração da pausa do lote, em segundos
+                <input type="number" name="batch_pause" min="0" max="7200">
+              </label>
+              <label>
+                Limite máximo por hora
+                <input type="number" name="max_per_hour" min="1" max="2000" required>
+              </label>
+            </form>
+            <div class="actions">
+              <button type="button" id="saveAdminRateBtn">Salvar ritmo global</button>
+              <span class="hint">Essas configurações passam a valer para todos os usuários e novas campanhas.</span>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
@@ -995,6 +1020,10 @@ INDEX_HTML = r"""<!doctype html>
     const sessionUser = document.querySelector("#sessionUser");
     const logoutBtn = document.querySelector("#logoutBtn");
     const usernameInput = document.querySelector("#usernameInput");
+    const globalRateHint = document.querySelector("#globalRateHint");
+    const adminPanel = document.querySelector("#adminPanel");
+    const adminRateForm = document.querySelector("#adminRateForm");
+    const saveAdminRateBtn = document.querySelector("#saveAdminRateBtn");
     const previewBox = document.querySelector("#previewBox");
     const statusBox = document.querySelector("#statusBox");
     const logBox = document.querySelector("#logBox");
@@ -1023,6 +1052,7 @@ INDEX_HTML = r"""<!doctype html>
     const formatBlockSelect = document.querySelector("#formatBlockSelect");
     const textColorInput = document.querySelector("#textColorInput");
     const highlightColorInput = document.querySelector("#highlightColorInput");
+    let globalRateConfig = null;
     let sourceMode = false;
     let pollTimer = null;
 
@@ -1037,6 +1067,22 @@ INDEX_HTML = r"""<!doctype html>
       const localUser = fullSender.endsWith("@tceal.tc.br") ? fullSender.replace("@tceal.tc.br", "") : fullSender;
       sessionUser.textContent = fullSender || "Sessão autenticada";
       usernameInput.value = localUser;
+      globalRateConfig = payload.rate_config || null;
+      applyRateConfig(globalRateConfig);
+      adminPanel.classList.toggle("hidden", !payload.is_admin);
+    }
+
+    function applyRateConfig(config) {
+      if (!config) return;
+      globalRateConfig = config;
+      globalRateHint.textContent = `Ritmo global atual: delay ${config.delay_min}s a ${config.delay_max}s | lote ${config.batch_size} | pausa ${config.batch_pause}s | limite ${config.max_per_hour}/h.`;
+      if (adminRateForm) {
+        adminRateForm.querySelector('[name="delay_min"]').value = config.delay_min;
+        adminRateForm.querySelector('[name="delay_max"]').value = config.delay_max;
+        adminRateForm.querySelector('[name="batch_size"]').value = config.batch_size;
+        adminRateForm.querySelector('[name="batch_pause"]').value = config.batch_pause;
+        adminRateForm.querySelector('[name="max_per_hour"]').value = config.max_per_hour;
+      }
     }
 
     document.querySelectorAll(".tab").forEach((tab) => {
@@ -1161,6 +1207,24 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok) throw new Error(payload.error || "Não foi possível concluir a ação.");
       return payload;
     }
+
+    saveAdminRateBtn?.addEventListener("click", async () => {
+      const params = new URLSearchParams(new FormData(adminRateForm));
+      const response = await fetch("/api/admin/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        statusBox.className = "status error";
+        statusBox.textContent = payload.error || "Não foi possível salvar o ritmo global.";
+        return;
+      }
+      applyRateConfig(payload.rate_config || null);
+      statusBox.className = "status done";
+      statusBox.textContent = "Ritmo global atualizado com sucesso.";
+    });
 
     logoutBtn.addEventListener("click", async () => {
       await fetch("/api/logout", { method: "POST" });
@@ -1430,6 +1494,47 @@ def upsert_user(email_address: str) -> None:
         connection.commit()
 
 
+def is_admin_email(email_address: str) -> bool:
+    return email_address.strip().lower() in ADMIN_EMAILS
+
+
+def global_rate_defaults() -> dict[str, int]:
+    return {
+        "delay_min": 20,
+        "delay_max": 45,
+        "batch_size": 25,
+        "batch_pause": 300,
+        "max_per_hour": 90,
+    }
+
+
+def load_rate_config() -> dict[str, int]:
+    defaults = global_rate_defaults()
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            "SELECT key, value FROM app_settings WHERE key IN (%s, %s, %s, %s, %s)",
+            ("delay_min", "delay_max", "batch_size", "batch_pause", "max_per_hour"),
+        ).fetchall()
+    values = {row["key"]: int(row["value"]) for row in rows}
+    return {**defaults, **values}
+
+
+def save_rate_config(config: dict[str, int]) -> dict[str, int]:
+    with DB_LOCK, db_connect() as connection:
+        for key, value in config.items():
+            connection.execute(
+                """
+                INSERT INTO app_settings (key, value)
+                VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value
+                """,
+                (key, str(int(value))),
+            )
+        connection.commit()
+    return load_rate_config()
+
+
 def get_session(session_id: str) -> dict[str, Any] | None:
     if not session_id:
         return None
@@ -1538,8 +1643,17 @@ def init_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
         connection.commit()
     migrate_legacy_storage()
+    save_rate_config(load_rate_config())
 
 
 def migrate_legacy_storage() -> None:
@@ -3203,7 +3317,44 @@ def index_alias(request: Request) -> HTMLResponse:
 @app.get("/api/me")
 def api_me(request: Request) -> JSONResponse:
     session = require_request_session(request)
-    return JSONResponse({"sender": session["sender"]})
+    return JSONResponse(
+        {
+            "sender": session["sender"],
+            "is_admin": is_admin_email(session["sender"]),
+            "rate_config": load_rate_config(),
+        }
+    )
+
+
+@app.get("/api/admin/config")
+def api_admin_config(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    if not is_admin_email(session["sender"]):
+        raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
+    return JSONResponse({"rate_config": load_rate_config()})
+
+
+@app.post("/api/admin/config")
+async def api_admin_config_update(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    if not is_admin_email(session["sender"]):
+        raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    delay_min = as_int(parsed.get("delay_min", ["20"])[0], 20, 1, 3600)
+    delay_max = as_int(parsed.get("delay_max", ["45"])[0], 45, 1, 3600)
+    if delay_min > delay_max:
+        delay_min, delay_max = delay_max, delay_min
+    config = save_rate_config(
+        {
+            "delay_min": delay_min,
+            "delay_max": delay_max,
+            "batch_size": as_int(parsed.get("batch_size", ["25"])[0], 25, 0, 500),
+            "batch_pause": as_int(parsed.get("batch_pause", ["300"])[0], 300, 0, 7200),
+            "max_per_hour": as_int(parsed.get("max_per_hour", ["90"])[0], 90, 1, 2000),
+        }
+    )
+    return JSONResponse({"ok": True, "rate_config": config})
 
 
 @app.get("/api/status")
@@ -3285,21 +3436,15 @@ async def api_preview(request: Request) -> JSONResponse:
     require_request_session(request)
     fields = await request_formdata(request)
     recipients, invalid = parse_recipients(fields)
-    delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
-    delay_max = as_int(field_value(fields, "delay_max"), 45, 1, 3600)
-    if delay_min > delay_max:
-        delay_min, delay_max = delay_max, delay_min
-    batch_size = as_int(field_value(fields, "batch_size"), 25, 0, 500)
-    batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
-    max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
+    rate_config = load_rate_config()
     scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
     estimate = build_campaign_estimate(
         recipients,
-        delay_min,
-        delay_max,
-        batch_size,
-        batch_pause,
-        max_per_hour,
+        rate_config["delay_min"],
+        rate_config["delay_max"],
+        rate_config["batch_size"],
+        rate_config["batch_pause"],
+        rate_config["max_per_hour"],
         start_at=scheduled_for or time.time(),
     )
     return JSONResponse(
@@ -3339,13 +3484,12 @@ async def api_start(request: Request) -> JSONResponse:
     if not subject or not body:
         raise HTTPException(status_code=400, detail="Informe assunto e corpo da mensagem.")
 
-    delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
-    delay_max = as_int(field_value(fields, "delay_max"), 45, 1, 3600)
-    if delay_min > delay_max:
-        delay_min, delay_max = delay_max, delay_min
-    batch_size = as_int(field_value(fields, "batch_size"), 25, 0, 500)
-    batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
-    max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
+    rate_config = load_rate_config()
+    delay_min = rate_config["delay_min"]
+    delay_max = rate_config["delay_max"]
+    batch_size = rate_config["batch_size"]
+    batch_pause = rate_config["batch_pause"]
+    max_per_hour = rate_config["max_per_hour"]
     reply_to = field_value(fields, "reply_to").strip()
     scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
     if reply_to and not EMAIL_RE.match(reply_to):
