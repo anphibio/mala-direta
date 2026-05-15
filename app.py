@@ -27,7 +27,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -110,6 +110,7 @@ class MailJob:
     scheduled_for: float | None = None
     estimated_duration_seconds: int = 0
     estimated_end_at: float | None = None
+    last_error: str = ""
     report_path: str | None = None
     logs: list[dict[str, Any]] = field(default_factory=list)
     report_rows: list[dict[str, str]] = field(default_factory=list)
@@ -120,6 +121,186 @@ class MailJob:
 JOB_LOCK = threading.Lock()
 CURRENT_JOB: MailJob | None = None
 DB_LOCK = threading.Lock()
+SESSION_LOCK = threading.Lock()
+SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+LOGIN_HTML = r"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entrar | Mala Direta TCE/AL</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1d2733;
+      --muted: #667085;
+      --line: #d7dde5;
+      --blue: #205493;
+      --shadow: 0 12px 28px rgba(29, 39, 51, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(32, 84, 147, .10), transparent 28%),
+        linear-gradient(180deg, #fbfcfe 0%, #f3f6fa 100%);
+      color: var(--ink);
+    }
+    .login-shell {
+      width: min(100%, 460px);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .brand img {
+      width: 220px;
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+      margin: 0;
+    }
+    form {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+    label {
+      display: grid;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    input {
+      width: 100%;
+      border: 1px solid #c6ced8;
+      border-radius: 6px;
+      padding: 11px 12px;
+      font: inherit;
+      font-size: 14px;
+      color: var(--ink);
+      background: #fff;
+      outline: none;
+    }
+    input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(32, 84, 147, .14);
+    }
+    .prefix {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+    .prefix input { border-radius: 6px 0 0 6px; }
+    .prefix span {
+      border: 1px solid #c6ced8;
+      border-left: 0;
+      padding: 11px 12px;
+      min-height: 43px;
+      display: flex;
+      align-items: center;
+      border-radius: 0 6px 6px 0;
+      color: var(--muted);
+      background: #f8fafc;
+      font-size: 14px;
+    }
+    button {
+      min-height: 44px;
+      border: 1px solid var(--blue);
+      background: var(--blue);
+      color: #fff;
+      border-radius: 6px;
+      padding: 0 14px;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .error {
+      border-radius: 6px;
+      padding: 11px 12px;
+      background: #fff1ef;
+      color: #9f2d20;
+      font-size: 14px;
+      line-height: 1.45;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-shell">
+    <div class="brand">
+      <img src="__BRAND_IMAGE_URL__" alt="TCE-AL">
+    </div>
+    <h1>Entrar</h1>
+    <p class="hint">Use sua conta institucional. Essa mesma conta será usada para enviar as campanhas e acessar o histórico do seu perfil.</p>
+    <form id="loginForm">
+      <label>
+        Usuário
+        <div class="prefix">
+          <input name="username" autocomplete="username" required placeholder="seu.usuario">
+          <span>@tceal.tc.br</span>
+        </div>
+      </label>
+      <label>
+        Senha
+        <input type="password" name="password" autocomplete="current-password" required placeholder="Senha do e-mail">
+      </label>
+      <div class="error" id="loginError"></div>
+      <button type="submit">Entrar</button>
+    </form>
+  </div>
+  <script>
+    const loginForm = document.querySelector("#loginForm");
+    const loginError = document.querySelector("#loginError");
+
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      loginError.style.display = "none";
+      const payload = new URLSearchParams(new FormData(loginForm));
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: payload.toString(),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        loginError.textContent = data.error || "Não foi possível entrar.";
+        loginError.style.display = "block";
+        return;
+      }
+      window.location.href = "/";
+    });
+  </script>
+</body>
+</html>
+"""
+LOGIN_HTML = LOGIN_HTML.replace("__BRAND_IMAGE_URL__", BRAND_IMAGE_URL)
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -196,6 +377,18 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
       font-size: 14px;
       white-space: nowrap;
+    }
+    .session-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .session-user {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
     }
     main {
       max-width: 1220px;
@@ -575,7 +768,11 @@ INDEX_HTML = r"""<!doctype html>
         <div class="hint">Envio autenticado com controles de ritmo, fila e personalização por CSV.</div>
         </div>
       </div>
-      <div class="server">SMTP: smtp.tceal.tc.br:587 STARTTLS</div>
+      <div class="session-tools">
+        <div class="session-user" id="sessionUser">Autenticando...</div>
+        <button type="button" id="logoutBtn">Sair</button>
+        <div class="server">SMTP: smtp.tceal.tc.br:587 STARTTLS</div>
+      </div>
     </div>
   </header>
 
@@ -583,20 +780,21 @@ INDEX_HTML = r"""<!doctype html>
     <section>
       <form id="mailForm" class="form">
         <div>
-          <p class="panel-title">Acesso de envio</p>
+          <p class="panel-title">Conta autenticada</p>
           <div class="grid">
             <label>
               Usuário
               <div class="prefix">
-                <input name="username" autocomplete="username" required placeholder="seu.usuario">
+                <input name="username" id="usernameInput" autocomplete="username" required placeholder="seu.usuario" readonly>
                 <span>@tceal.tc.br</span>
               </div>
             </label>
             <label>
-              Senha
-              <input type="password" name="password" autocomplete="current-password" required placeholder="Senha do e-mail">
+              Sessão
+              <input type="text" id="sessionState" value="Conectado com a conta autenticada." readonly>
             </label>
           </div>
+          <div class="hint">Cada usuário acessa apenas o próprio histórico e usa a própria conta para o envio.</div>
         </div>
 
         <div>
@@ -738,7 +936,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
 
         <div class="actions">
-          <button type="button" id="previewBtn">Pré-validar lista</button>
+          <button type="button" id="previewBtn">Carregar lista</button>
           <button type="submit" class="primary">Iniciar envio</button>
           <span class="hint">A senha fica apenas na memória enquanto o envio roda.</span>
         </div>
@@ -774,6 +972,9 @@ INDEX_HTML = r"""<!doctype html>
 
   <script>
     const form = document.querySelector("#mailForm");
+    const sessionUser = document.querySelector("#sessionUser");
+    const logoutBtn = document.querySelector("#logoutBtn");
+    const usernameInput = document.querySelector("#usernameInput");
     const previewBox = document.querySelector("#previewBox");
     const statusBox = document.querySelector("#statusBox");
     const logBox = document.querySelector("#logBox");
@@ -804,6 +1005,19 @@ INDEX_HTML = r"""<!doctype html>
     const highlightColorInput = document.querySelector("#highlightColorInput");
     let sourceMode = false;
     let pollTimer = null;
+
+    async function loadSession() {
+      const response = await fetch("/api/me");
+      if (response.status === 401) {
+        window.location.href = "/";
+        return;
+      }
+      const payload = await response.json();
+      const fullSender = payload.sender || "";
+      const localUser = fullSender.endsWith("@tceal.tc.br") ? fullSender.replace("@tceal.tc.br", "") : fullSender;
+      sessionUser.textContent = fullSender || "Sessão autenticada";
+      usernameInput.value = localUser;
+    }
 
     document.querySelectorAll(".tab").forEach((tab) => {
       tab.addEventListener("click", () => {
@@ -920,15 +1134,24 @@ INDEX_HTML = r"""<!doctype html>
     async function post(path, data) {
       const response = await fetch(path, { method: "POST", body: data });
       const payload = await response.json();
+      if (response.status === 401) {
+        window.location.href = "/";
+        throw new Error("Sessão expirada.");
+      }
       if (!response.ok) throw new Error(payload.error || "Não foi possível concluir a ação.");
       return payload;
     }
 
+    logoutBtn.addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      window.location.href = "/";
+    });
+
     document.querySelector("#previewBtn").addEventListener("click", async () => {
-      previewBox.textContent = "Validando lista...";
+      previewBox.textContent = "Carregando lista...";
       try {
         const payload = await post("/api/preview", formDataWithSource());
-        previewBox.innerHTML = `<strong>${payload.valid}</strong> e-mails válidos, <strong>${payload.invalid}</strong> inválidos/duplicados. Amostra: ${payload.sample.map(escapeHtml).join(", ") || "sem amostra"}.`;
+        previewBox.innerHTML = `<strong>${payload.valid}</strong> e-mails carregados, <strong>${payload.invalid}</strong> inválidos/duplicados. Amostra: ${payload.sample.map(escapeHtml).join(", ") || "sem amostra"}.`;
         renderEstimate(payload.estimate);
       } catch (error) {
         previewBox.textContent = error.message;
@@ -966,6 +1189,10 @@ INDEX_HTML = r"""<!doctype html>
     async function updateStatus() {
       try {
         const response = await fetch("/api/status");
+        if (response.status === 401) {
+          window.location.href = "/";
+          return;
+        }
         const job = await response.json();
         renderJob(job);
         updateHistory();
@@ -978,6 +1205,10 @@ INDEX_HTML = r"""<!doctype html>
     async function updateHistory() {
       try {
         const response = await fetch("/api/history");
+        if (response.status === 401) {
+          window.location.href = "/";
+          return;
+        }
         const payload = await response.json();
         suppressionInfo.textContent = `Lista de supressão: ${payload.suppression_count || 0} contato(s).`;
         activeCampaignsBox.innerHTML = (payload.active_items || []).length
@@ -1017,7 +1248,7 @@ INDEX_HTML = r"""<!doctype html>
               previewBox.innerHTML = `<strong>${payload.recipients.length}</strong> e-mails com falha carregados para retry. Você pode editar os endereços antes de reenviar.`;
               statusBox.className = "status";
               statusBox.textContent = `Retry preparado com base na campanha "${button.dataset.subject || "anterior"}".`;
-              estimateBox.textContent = "Revise a lista e clique em Pré-validar lista para recalcular a previsão.";
+              estimateBox.textContent = "Revise a lista e clique em Carregar lista para recalcular a previsão.";
               manualEmails.focus();
               manualEmails.scrollIntoView({ behavior: "smooth", block: "center" });
             } catch (error) {
@@ -1066,7 +1297,7 @@ INDEX_HTML = r"""<!doctype html>
       if (job.status === "paused") return "Envio pausado. A fila será retomada quando você clicar em Retomar.";
       if (job.status === "done") return "Campanha concluída.";
       if (job.status === "cancelled") return "Campanha cancelada.";
-      if (job.status === "failed") return "A campanha foi interrompida por falha.";
+      if (job.status === "failed") return job.last_error || "A campanha foi interrompida por falha.";
       if (job.status === "scheduled") return `Campanha agendada para ${job.scheduled_for_text || "horário informado"}.`;
       if (job.next_send_in && job.next_send_in > 0) return `Enviando com controle de ritmo. Próximo envio em ${job.next_send_in}s.`;
       return job.current ? `Processando ${job.current}` : "Envio em andamento.";
@@ -1090,8 +1321,10 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     toggleEditorMode();
-    updateStatus();
-    updateHistory();
+    loadSession().then(() => {
+      updateStatus();
+      updateHistory();
+    });
   </script>
 </body>
 </html>
@@ -1129,6 +1362,55 @@ def read_json_file(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def parse_cookie_header(raw_cookie: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for chunk in (raw_cookie or "").split(";"):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def smtp_login_check(sender: str, password: str) -> None:
+    context = ssl.create_default_context()
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as smtp:
+        smtp.ehlo()
+        smtp.starttls(context=context)
+        smtp.ehlo()
+        smtp.login(sender, password)
+
+
+def create_session(sender: str, password: str) -> str:
+    token = secrets.token_urlsafe(32)
+    with SESSION_LOCK:
+        SESSIONS[token] = {
+            "sender": sender,
+            "password": password,
+            "created_at": time.time(),
+            "last_seen": time.time(),
+        }
+    return token
+
+
+def get_session(session_id: str) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    with SESSION_LOCK:
+        session = SESSIONS.get(session_id)
+        if not session:
+            return None
+        session["last_seen"] = time.time()
+        return dict(session)
+
+
+def delete_session(session_id: str) -> None:
+    if not session_id:
+        return
+    with SESSION_LOCK:
+        SESSIONS.pop(session_id, None)
 
 
 def db_connect() -> sqlite3.Connection:
@@ -1266,16 +1548,18 @@ def migrate_legacy_storage() -> None:
         LEGACY_SUPPRESSION_FILE.unlink()
 
 
-def load_history() -> list[dict[str, Any]]:
+def load_history(sender_filter: str | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path
+        FROM campaigns
+    """
+    params: tuple[Any, ...] = ()
+    if sender_filter:
+        query += " WHERE sender = ?"
+        params = (sender_filter,)
+    query += " ORDER BY created_at DESC LIMIT 50"
     with DB_LOCK, db_connect() as connection:
-        rows = connection.execute(
-            """
-            SELECT id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path
-            FROM campaigns
-            ORDER BY created_at DESC
-            LIMIT 50
-            """
-        ).fetchall()
+        rows = connection.execute(query, params).fetchall()
     items: list[dict[str, Any]] = []
     for row in rows:
         report_path = row["report_path"] or ""
@@ -1301,12 +1585,12 @@ def load_history() -> list[dict[str, Any]]:
     return items
 
 
-def load_active_campaigns() -> list[dict[str, Any]]:
-    return [item for item in load_history() if item.get("status") in {"running", "paused", "scheduled"}]
+def load_active_campaigns(sender_filter: str | None = None) -> list[dict[str, Any]]:
+    return [item for item in load_history(sender_filter) if item.get("status") in {"running", "paused", "scheduled"}]
 
 
-def load_first_active_campaign() -> dict[str, Any] | None:
-    items = load_active_campaigns()
+def load_first_active_campaign(sender_filter: str | None = None) -> dict[str, Any] | None:
+    items = load_active_campaigns(sender_filter)
     return items[0] if items else None
 
 
@@ -1468,6 +1752,7 @@ def campaign_summary(job: MailJob) -> dict[str, Any]:
         }
         if job.estimated_end_at
         else None,
+        "last_error": job.last_error,
         "report_url": f"/api/report?id={job.id}" if job.report_path else "",
     }
 
@@ -1550,10 +1835,29 @@ def is_permanent_smtp_error(exc: Exception) -> tuple[bool, str]:
     return False, str(exc)
 
 
+def friendly_send_error(exc: Exception) -> str:
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "Usuário ou senha do e-mail incorretos. Revise as credenciais e tente novamente."
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return "O servidor recusou o remetente informado. Verifique a conta usada no envio."
+    if isinstance(exc, smtplib.SMTPConnectError):
+        return "Não foi possível conectar ao servidor de e-mail."
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return "A conexão com o servidor de e-mail foi encerrada durante o envio."
+    if isinstance(exc, TimeoutError):
+        return "O servidor de e-mail demorou demais para responder."
+    return str(exc)
+
+
 def add_log(job: MailJob, message: str) -> None:
     with JOB_LOCK:
         job.logs.append({"time": now_text(), "message": message})
         job.logs = job.logs[-300:]
+
+
+def set_job_error(job: MailJob, message: str) -> None:
+    with JOB_LOCK:
+        job.last_error = message
 
 
 def sanitize_html(raw_html: str) -> str:
@@ -2173,6 +2477,7 @@ def run_job(
             smtp.starttls(context=context)
             smtp.ehlo()
             smtp.login(job.sender, password)
+            set_job_error(job, "")
             add_log(job, f"Autenticado como {job.sender}. Iniciando fila com {job.total} destinatários.")
 
             for index, recipient in enumerate(recipients, start=1):
@@ -2252,18 +2557,20 @@ def run_job(
             )
             monitor_thread.start()
     except Exception as exc:  # noqa: BLE001
+        friendly_error = friendly_send_error(exc)
         with JOB_LOCK:
             job.current = ""
             job.finished_at = time.time()
             job.status = "failed"
-        add_log(job, f"Envio interrompido: {exc}")
+        set_job_error(job, friendly_error)
+        add_log(job, f"Envio interrompido: {friendly_error}")
         finish_job(job)
 
 
-def job_snapshot() -> dict[str, Any]:
+def job_snapshot(sender_filter: str | None = None) -> dict[str, Any]:
     with JOB_LOCK:
         job = CURRENT_JOB
-        if job and job.status in {"running", "paused", "scheduled"}:
+        if job and job.status in {"running", "paused", "scheduled"} and (not sender_filter or job.sender == sender_filter):
             next_send_in = 0
             if job.next_send_at:
                 next_send_in = max(0, int(job.next_send_at - time.time()))
@@ -2289,11 +2596,12 @@ def job_snapshot() -> dict[str, Any]:
                 }
                 if job.estimated_end_at
                 else None,
+                "last_error": job.last_error,
                 "report_url": f"/api/report?id={job.id}" if job.report_path else "",
                 "suppression_count": suppression_count(),
                 "logs": list(job.logs),
             }
-    active_item = load_first_active_campaign()
+    active_item = load_first_active_campaign(sender_filter)
     if active_item:
         return {
             "id": active_item["id"],
@@ -2308,6 +2616,7 @@ def job_snapshot() -> dict[str, Any]:
             "next_send_in": 0,
             "scheduled_for_text": active_item["scheduled_for_text"],
             "estimate": active_item.get("estimate"),
+            "last_error": "",
             "report_url": active_item["report_url"],
             "suppression_count": suppression_count(),
             "logs": [
@@ -2317,31 +2626,56 @@ def job_snapshot() -> dict[str, Any]:
                 }
             ],
         }
-    return {"id": None, "status": "idle", "logs": [], "suppression_count": suppression_count()}
+    return {"id": None, "status": "idle", "logs": [], "suppression_count": suppression_count(), "last_error": ""}
 
 
 class MailerHandler(BaseHTTPRequestHandler):
     server_version = "MalaDiretaTCE/1.0"
 
+    def current_session(self) -> tuple[str, dict[str, Any] | None]:
+        session_id = parse_cookie_header(self.headers.get("Cookie", "")).get("md_session", "")
+        return session_id, get_session(session_id)
+
+    def require_session(self) -> dict[str, Any]:
+        _, session = self.current_session()
+        if not session:
+            raise PermissionError("Sua sessão expirou. Entre novamente.")
+        return session
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in {"/", "/index.html"}:
-            self.send_text(INDEX_HTML, "text/html; charset=utf-8")
+            _, session = self.current_session()
+            self.send_text(INDEX_HTML if session else LOGIN_HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/me":
+            _, session = self.current_session()
+            if not session:
+                self.send_json({"error": "Sessão não autenticada."}, HTTPStatus.UNAUTHORIZED)
+                return
+            self.send_json({"sender": session["sender"]})
             return
         if parsed.path == "/api/status":
-            self.send_json(job_snapshot())
+            session = self.require_session()
+            self.send_json(job_snapshot(session["sender"]))
             return
         if parsed.path == "/api/history":
+            session = self.require_session()
             self.send_json(
                 {
-                    "items": load_history()[:10],
-                    "active_items": load_active_campaigns(),
+                    "items": load_history(session["sender"])[:10],
+                    "active_items": load_active_campaigns(session["sender"]),
                     "suppression_count": suppression_count(),
                 }
             )
             return
         if parsed.path == "/api/report":
+            session = self.require_session()
             report_id = parse_qs(parsed.query).get("id", [""])[0]
+            user_campaign_ids = {item["id"] for item in load_history(session["sender"])}
+            if report_id not in user_campaign_ids:
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             report_path = REPORTS_DIR / f"{report_id}.csv"
             if not report_id or not report_path.exists():
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -2353,7 +2687,12 @@ class MailerHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/retry-source":
+            session = self.require_session()
             campaign_id = parse_qs(parsed.query).get("id", [""])[0]
+            user_campaign_ids = {item["id"] for item in load_history(session["sender"])}
+            if campaign_id not in user_campaign_ids:
+                self.send_json({"error": "Essa campanha não pertence ao usuário autenticado."}, HTTPStatus.FORBIDDEN)
+                return
             recipients = load_failed_recipients_from_report(campaign_id)
             if not campaign_id:
                 self.send_json({"error": "Informe a campanha para preparar o retry."}, HTTPStatus.BAD_REQUEST)
@@ -2368,7 +2707,11 @@ class MailerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/preview":
+            if parsed.path == "/api/login":
+                self.handle_login()
+            elif parsed.path == "/api/logout":
+                self.handle_logout()
+            elif parsed.path == "/api/preview":
                 self.handle_preview()
             elif parsed.path == "/api/start":
                 self.handle_start()
@@ -2382,10 +2725,37 @@ class MailerHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except PermissionError as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.UNAUTHORIZED)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": f"Erro inesperado: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def handle_login(self) -> None:
+        fields = self.read_simple_form()
+        sender = clean_username(fields.get("username", ""))
+        password = fields.get("password", "")
+        if not password:
+            raise ValueError("Informe a senha do e-mail.")
+        try:
+            smtp_login_check(sender, password)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(friendly_send_error(exc)) from exc
+        session_id = create_session(sender, password)
+        self.send_json(
+            {"ok": True, "sender": sender},
+            headers={"Set-Cookie": "md_session={}; Path=/; HttpOnly; SameSite=Lax".format(session_id)},
+        )
+
+    def handle_logout(self) -> None:
+        session_id, _ = self.current_session()
+        delete_session(session_id)
+        self.send_json(
+            {"ok": True},
+            headers={"Set-Cookie": "md_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"},
+        )
+
     def handle_preview(self) -> None:
+        self.require_session()
         fields = self.read_form()
         recipients, invalid = parse_recipients(fields)
         delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
@@ -2416,6 +2786,7 @@ class MailerHandler(BaseHTTPRequestHandler):
 
     def handle_start(self) -> None:
         global CURRENT_JOB
+        session = self.require_session()
 
         with JOB_LOCK:
             if CURRENT_JOB and CURRENT_JOB.status in {"running", "paused", "scheduled"}:
@@ -2424,10 +2795,8 @@ class MailerHandler(BaseHTTPRequestHandler):
             raise ValueError("Já existe uma campanha ativa ou agendada. Conclua ou cancele antes de criar outra.")
 
         fields = self.read_form()
-        sender = clean_username(field_value(fields, "username"))
-        password = field_value(fields, "password")
-        if not password:
-            raise ValueError("Informe a senha do e-mail.")
+        sender = session["sender"]
+        password = session["password"]
         recipients, invalid = parse_recipients(fields)
         if not recipients:
             raise ValueError("Nenhum e-mail válido foi encontrado.")
@@ -2522,13 +2891,14 @@ class MailerHandler(BaseHTTPRequestHandler):
                 password,
             )
         thread.start()
-        self.send_json({"ok": True, "job_id": job.id, "job": job_snapshot()})
+        self.send_json({"ok": True, "job_id": job.id, "job": job_snapshot(sender)})
 
     def handle_pause(self) -> None:
+        session = self.require_session()
         should_log = False
         with JOB_LOCK:
             job = CURRENT_JOB
-            if job and job.status == "running":
+            if job and job.sender == session["sender"] and job.status == "running":
                 job.pause_event.set()
                 job.status = "paused"
                 job.next_send_at = None
@@ -2536,37 +2906,42 @@ class MailerHandler(BaseHTTPRequestHandler):
         if should_log and job:
             add_log(job, "Pausa solicitada pelo usuário.")
             persist_campaign(job)
-        self.send_json(job_snapshot())
+        self.send_json(job_snapshot(session["sender"]))
 
     def handle_resume(self) -> None:
+        session = self.require_session()
         should_log = False
         with JOB_LOCK:
             job = CURRENT_JOB
-            if job and job.status == "paused":
+            if job and job.sender == session["sender"] and job.status == "paused":
                 job.pause_event.clear()
                 job.status = "running"
                 should_log = True
         if should_log and job:
             add_log(job, "Envio retomado pelo usuário.")
             persist_campaign(job)
-        self.send_json(job_snapshot())
+        self.send_json(job_snapshot(session["sender"]))
 
     def handle_cancel(self, parsed: Any) -> None:
+        session = self.require_session()
         campaign_id = parse_qs(parsed.query).get("id", [""])[0]
         if not campaign_id:
             with JOB_LOCK:
                 job = CURRENT_JOB
-                campaign_id = job.id if job and job.status in {"running", "paused", "scheduled"} else ""
+                campaign_id = job.id if job and job.sender == session["sender"] and job.status in {"running", "paused", "scheduled"} else ""
         if not campaign_id:
             raise ValueError("Nenhuma campanha em andamento foi encontrada para cancelar.")
+        allowed_ids = {item["id"] for item in load_history(session["sender"])}
+        if campaign_id not in allowed_ids:
+            raise PermissionError("Essa campanha não pertence ao usuário autenticado.")
         if not cancel_campaign_by_id(campaign_id):
             raise ValueError("Não foi possível cancelar a campanha informada.")
         self.send_json(
             {
                 "ok": True,
-                "job": job_snapshot(),
-                "active_items": load_active_campaigns(),
-                "items": load_history()[:10],
+                "job": job_snapshot(session["sender"]),
+                "active_items": load_active_campaigns(session["sender"]),
+                "items": load_history(session["sender"])[:10],
                 "suppression_count": suppression_count(),
             }
         )
@@ -2579,12 +2954,23 @@ class MailerHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_length)
         return parse_multipart_form(raw_body, content_type)
 
+    def read_simple_form(self) -> dict[str, str]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+        parsed = parse_qs(raw_body)
+        return {key: values[0] if values else "" for key, values in parsed.items()}
+
     def send_text(self, content: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_bytes(content.encode("utf-8"), content_type, status)
 
-    def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_bytes(raw, "application/json; charset=utf-8", status)
+        self.send_bytes(raw, "application/json; charset=utf-8", status, headers=headers)
 
     def send_bytes(
         self,
