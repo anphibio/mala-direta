@@ -1005,7 +1005,7 @@ INDEX_HTML = r"""<!doctype html>
         <button type="button" id="pauseBtn" disabled>Pausar</button>
         <button type="button" id="resumeBtn" disabled>Retomar</button>
         <button type="button" class="danger" id="cancelBtn" disabled>Cancelar</button>
-        <button type="button" id="reportBtn" disabled>Baixar relatório</button>
+        <button type="button" id="reportBtn" disabled>Abrir relatório</button>
       </div>
       <div class="log" id="logBox">Aguardando envio...</div>
       <div>
@@ -1451,6 +1451,12 @@ def format_duration(seconds: int) -> str:
     return " ".join(parts)
 
 
+def safe_filename_part(value: str, fallback: str = "campanha") -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    cleaned = cleaned.strip("-")
+    return cleaned or fallback
+
+
 def read_json_file(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -1817,10 +1823,32 @@ def load_history(sender_filter: str | None = None) -> list[dict[str, Any]]:
                 "scheduled_for_text": format_timestamp(row["scheduled_for"]),
                 "finished_at": row["finished_at"],
                 "finished_at_text": format_timestamp(row["finished_at"]),
-                "report_url": f"/api/report?id={row['id']}" if report_path else "",
+                "report_url": f"/report?id={row['id']}" if report_path else "",
             }
         )
     return items
+
+
+def load_campaign_for_sender(campaign_id: str, sender: str) -> dict[str, Any] | None:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT id, sender, subject, status, total, sent, failed, skipped, created_at, scheduled_for, finished_at, report_path
+            FROM campaigns
+            WHERE id = %s AND sender = %s
+            LIMIT 1
+            """,
+            (campaign_id, sender),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def load_report_rows(campaign_id: str) -> list[dict[str, str]]:
+    report_path = REPORTS_DIR / f"{campaign_id}.csv"
+    if not report_path.exists():
+        return []
+    with report_path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def load_active_campaigns(sender_filter: str | None = None) -> list[dict[str, Any]]:
@@ -1991,7 +2019,7 @@ def campaign_summary(job: MailJob) -> dict[str, Any]:
         if job.estimated_end_at
         else None,
         "last_error": job.last_error,
-        "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+        "report_url": f"/report?id={job.id}" if job.report_path else "",
     }
 
 
@@ -2879,7 +2907,7 @@ def job_snapshot(sender_filter: str | None = None) -> dict[str, Any]:
                 if job.estimated_end_at
                 else None,
                 "last_error": job.last_error,
-                "report_url": f"/api/report?id={job.id}" if job.report_path else "",
+                "report_url": f"/report?id={job.id}" if job.report_path else "",
                 "suppression_count": suppression_count(),
                 "logs": list(job.logs),
             }
@@ -3321,6 +3349,99 @@ def home(request: Request) -> HTMLResponse:
     return HTMLResponse(INDEX_HTML if session else LOGIN_HTML)
 
 
+@app.get("/report", response_class=HTMLResponse)
+def report_page(request: Request, id: str) -> HTMLResponse:
+    session = require_request_session(request)
+    campaign = load_campaign_for_sender(id, session["sender"])
+    if not campaign:
+        raise HTTPException(status_code=403, detail="Relatório não pertence ao usuário autenticado.")
+    report_rows = load_report_rows(id)
+    if not report_rows:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado.")
+    subject = campaign.get("subject", "Campanha")
+    title = html.escape(subject)
+    status = html.escape(str(campaign.get("status", "")))
+    sender = html.escape(str(campaign.get("sender", "")))
+    created_at = html.escape(format_timestamp(campaign.get("created_at")))
+    finished_at = html.escape(format_timestamp(campaign.get("finished_at")))
+    download_url = f"/api/report?id={id}"
+    rows_html = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('timestamp', '')))}</td>"
+        f"<td>{html.escape(str(row.get('email', '')))}</td>"
+        f"<td>{html.escape(str(row.get('domain', '')))}</td>"
+        f"<td>{html.escape(str(row.get('status', '')))}</td>"
+        f"<td>{html.escape(str(row.get('detail', '')))}</td>"
+        "</tr>"
+        for row in report_rows
+    )
+    page = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relatório - {title}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 0; background: #f4f6fb; color: #1f2937; }}
+    .wrap {{ max-width: 1180px; margin: 0 auto; padding: 24px; }}
+    .top {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }}
+    .meta {{ background: #fff; border: 1px solid #d8e0eb; border-radius: 12px; padding: 18px; flex: 1; }}
+    .meta h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    .meta p {{ margin: 6px 0; color: #516079; }}
+    .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
+    .btn {{ text-decoration: none; border-radius: 10px; padding: 12px 16px; border: 1px solid #2f5ea8; background: #2f5ea8; color: #fff; font-weight: 600; }}
+    .btn.secondary {{ background: #fff; color: #2f5ea8; }}
+    .table-wrap {{ background: #fff; border: 1px solid #d8e0eb; border-radius: 12px; overflow: auto; }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 760px; }}
+    th, td {{ text-align: left; padding: 12px 14px; border-bottom: 1px solid #e6ebf2; vertical-align: top; }}
+    th {{ background: #f8fafc; font-size: 13px; color: #5b6b84; text-transform: uppercase; letter-spacing: .04em; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .status {{ display: inline-block; padding: 4px 10px; background: #eef4ff; color: #2f5ea8; border-radius: 999px; font-size: 13px; font-weight: 600; }}
+    @media (max-width: 720px) {{
+      .wrap {{ padding: 16px; }}
+      .top {{ flex-direction: column; }}
+      .meta h1 {{ font-size: 22px; }}
+      .actions {{ width: 100%; }}
+      .btn {{ flex: 1; text-align: center; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="meta">
+        <h1>{title}</h1>
+        <p><span class="status">{status}</span></p>
+        <p><strong>Remetente:</strong> {sender}</p>
+        <p><strong>Início:</strong> {created_at or "-"}</p>
+        <p><strong>Término:</strong> {finished_at or "-"}</p>
+        <p><strong>Resumo:</strong> {campaign.get("sent", 0)}/{campaign.get("total", 0)} enviados, {campaign.get("failed", 0)} falhas, {campaign.get("skipped", 0)} ignorados.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="{download_url}">Baixar CSV</a>
+        <a class="btn secondary" href="/" target="_self">Voltar ao sistema</a>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Data/Hora</th>
+            <th>E-mail</th>
+            <th>Domínio</th>
+            <th>Status</th>
+            <th>Detalhe</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(page)
+
+
 @app.get("/index.html", response_class=HTMLResponse)
 def index_alias(request: Request) -> HTMLResponse:
     return home(request)
@@ -3390,16 +3511,17 @@ def api_history(request: Request) -> JSONResponse:
 @app.get("/api/report")
 def api_report(request: Request, id: str) -> FastAPIResponse:
     session = require_request_session(request)
-    user_campaign_ids = {item["id"] for item in load_history(session["sender"])}
-    if id not in user_campaign_ids:
+    campaign = load_campaign_for_sender(id, session["sender"])
+    if not campaign:
         raise HTTPException(status_code=403, detail="Relatório não pertence ao usuário autenticado.")
     report_path = REPORTS_DIR / f"{id}.csv"
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
+    filename = f"relatorio-{safe_filename_part(str(campaign.get('subject', 'campanha')))}.csv"
     return FastAPIResponse(
         content=report_path.read_bytes(),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="relatorio-{id}.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
