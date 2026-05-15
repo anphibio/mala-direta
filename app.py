@@ -685,6 +685,46 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 13px;
       line-height: 1.45;
     }
+    .library-box {
+      max-height: 240px;
+      overflow: auto;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .metric-card {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 7px;
+      padding: 12px;
+      min-height: 84px;
+    }
+    .metric-card strong {
+      display: block;
+      font-size: 24px;
+      margin-bottom: 6px;
+    }
+    .metric-card span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .library-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+      margin-bottom: 12px;
+    }
+    .tiny {
+      font-size: 12px;
+      color: var(--muted);
+    }
     .editor-shell {
       border: 1px solid #c6ced8;
       border-radius: 6px;
@@ -809,6 +849,7 @@ INDEX_HTML = r"""<!doctype html>
       .brand img { max-width: min(72vw, 240px); }
       .server { white-space: normal; }
       .grid { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .form { padding: 16px; }
     }
   </style>
@@ -961,6 +1002,25 @@ INDEX_HTML = r"""<!doctype html>
         </div>
 
         <div>
+          <p class="panel-title">Biblioteca do usuário</p>
+          <div class="library-actions">
+            <button type="button" id="saveTemplateBtn">Salvar template</button>
+            <button type="button" id="saveDraftBtn">Salvar rascunho</button>
+            <span class="hint" id="draftStateHint">Templates guardam mensagem e preferências. Rascunhos guardam a campanha completa.</span>
+          </div>
+          <div class="grid">
+            <div>
+              <div class="hint">Templates salvos</div>
+              <div class="preview library-box" id="templateListBox">Nenhum template salvo ainda.</div>
+            </div>
+            <div>
+              <div class="hint">Rascunhos</div>
+              <div class="preview library-box" id="draftListBox">Nenhum rascunho salvo ainda.</div>
+            </div>
+          </div>
+        </div>
+
+        <div>
           <p class="panel-title">Preferências da campanha</p>
           <div class="grid">
             <label>
@@ -1002,6 +1062,47 @@ INDEX_HTML = r"""<!doctype html>
               <span class="hint">Essas configurações passam a valer para todos os usuários e novas campanhas.</span>
             </div>
             <div style="margin-top:16px;">
+              <p class="panel-title">Dashboard administrativo</p>
+              <div class="metric-grid" id="adminMetricGrid">
+                <div class="metric-card"><strong id="metricCampaigns">0</strong><span>Campanhas</span></div>
+                <div class="metric-card"><strong id="metricSent">0</strong><span>Enviados</span></div>
+                <div class="metric-card"><strong id="metricFailure">0%</strong><span>Falha</span></div>
+                <div class="metric-card"><strong id="metricUsers">0</strong><span>Usuários ativos</span></div>
+              </div>
+              <div class="grid" style="margin-top:12px;">
+                <div>
+                  <div class="hint">Top remetentes</div>
+                  <div class="preview admin-log-box" id="adminTopSendersBox">Carregando métricas...</div>
+                </div>
+                <div>
+                  <div class="hint">Volume dos últimos 7 dias</div>
+                  <div class="preview admin-log-box" id="adminDailyVolumeBox">Carregando métricas...</div>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:16px;">
+              <p class="panel-title">Controle por domínio</p>
+              <div class="grid" id="domainPolicyForm">
+                <label>
+                  Domínio
+                  <input type="text" name="domain" placeholder="outlook.com">
+                </label>
+                <label>
+                  Espaçamento mínimo, em segundos
+                  <input type="number" name="minimum_gap_seconds" min="0" max="3600" value="60">
+                </label>
+                <label style="grid-column: 1 / -1;">
+                  Observação
+                  <input type="text" name="notes" placeholder="Ex.: política mais agressiva da Microsoft">
+                </label>
+              </div>
+              <div class="actions">
+                <button type="button" id="saveDomainPolicyBtn">Salvar regra por domínio</button>
+                <span class="hint">Essas regras complementam o ritmo global e valem para novas campanhas.</span>
+              </div>
+              <div class="preview admin-log-box" id="adminDomainPolicyBox">Carregando regras de domínio...</div>
+            </div>
+            <div style="margin-top:16px;">
               <p class="panel-title">LOG administrativo</p>
               <div class="grid">
                 <div>
@@ -1014,8 +1115,19 @@ INDEX_HTML = r"""<!doctype html>
                 </div>
               </div>
             </div>
+            <div style="margin-top:16px;">
+              <p class="panel-title">Auditoria recente</p>
+              <div class="preview admin-log-box" id="adminAuditLogBox">Carregando auditoria...</div>
+            </div>
           </div>
         </div>
+
+        <input type="hidden" name="stored_source_kind" id="storedSourceKind">
+        <input type="hidden" name="stored_source_filename" id="storedSourceFilename">
+        <input type="hidden" name="stored_source_b64" id="storedSourceB64">
+        <input type="hidden" name="stored_attachment_filename" id="storedAttachmentFilename">
+        <input type="hidden" name="stored_attachment_content_type" id="storedAttachmentContentType">
+        <input type="hidden" name="stored_attachment_b64" id="storedAttachmentB64">
 
         <div class="actions">
           <button type="button" id="previewBtn">Carregar lista</button>
@@ -1061,8 +1173,14 @@ INDEX_HTML = r"""<!doctype html>
     const adminPanel = document.querySelector("#adminPanel");
     const adminRateForm = document.querySelector("#adminRateForm");
     const saveAdminRateBtn = document.querySelector("#saveAdminRateBtn");
+    const saveDomainPolicyBtn = document.querySelector("#saveDomainPolicyBtn");
     const adminAccessLogBox = document.querySelector("#adminAccessLogBox");
     const adminCampaignLogBox = document.querySelector("#adminCampaignLogBox");
+    const adminAuditLogBox = document.querySelector("#adminAuditLogBox");
+    const adminTopSendersBox = document.querySelector("#adminTopSendersBox");
+    const adminDailyVolumeBox = document.querySelector("#adminDailyVolumeBox");
+    const adminDomainPolicyBox = document.querySelector("#adminDomainPolicyBox");
+    const domainPolicyForm = document.querySelector("#domainPolicyForm");
     const previewBox = document.querySelector("#previewBox");
     const statusBox = document.querySelector("#statusBox");
     const logBox = document.querySelector("#logBox");
@@ -1092,6 +1210,28 @@ INDEX_HTML = r"""<!doctype html>
     const formatBlockSelect = document.querySelector("#formatBlockSelect");
     const textColorInput = document.querySelector("#textColorInput");
     const highlightColorInput = document.querySelector("#highlightColorInput");
+    const subjectInput = form.querySelector('input[name="subject"]');
+    const replyToInput = form.querySelector('input[name="reply_to"]');
+    const scheduleInput = form.querySelector('input[name="schedule_at"]');
+    const sendCopyCheckbox = form.querySelector('input[name="send_copy_to_self"]');
+    const csvInput = form.querySelector('input[name="csv_file"]');
+    const txtInput = form.querySelector('input[name="txt_file"]');
+    const attachmentInput = form.querySelector('input[name="attachment_file"]');
+    const templateListBox = document.querySelector("#templateListBox");
+    const draftListBox = document.querySelector("#draftListBox");
+    const saveTemplateBtn = document.querySelector("#saveTemplateBtn");
+    const saveDraftBtn = document.querySelector("#saveDraftBtn");
+    const draftStateHint = document.querySelector("#draftStateHint");
+    const storedSourceKind = document.querySelector("#storedSourceKind");
+    const storedSourceFilename = document.querySelector("#storedSourceFilename");
+    const storedSourceB64 = document.querySelector("#storedSourceB64");
+    const storedAttachmentFilename = document.querySelector("#storedAttachmentFilename");
+    const storedAttachmentContentType = document.querySelector("#storedAttachmentContentType");
+    const storedAttachmentB64 = document.querySelector("#storedAttachmentB64");
+    const metricCampaigns = document.querySelector("#metricCampaigns");
+    const metricSent = document.querySelector("#metricSent");
+    const metricFailure = document.querySelector("#metricFailure");
+    const metricUsers = document.querySelector("#metricUsers");
     let globalRateConfig = null;
     let sourceMode = false;
     let pollTimer = null;
@@ -1113,6 +1253,7 @@ INDEX_HTML = r"""<!doctype html>
       if (payload.is_admin) {
         updateAdminLogs();
       }
+      updateLibrary();
     }
 
     function applyRateConfig(config) {
@@ -1260,6 +1401,67 @@ INDEX_HTML = r"""<!doctype html>
       return params;
     }
 
+    function clearStoredPayloads() {
+      storedSourceKind.value = "";
+      storedSourceFilename.value = "";
+      storedSourceB64.value = "";
+      storedAttachmentFilename.value = "";
+      storedAttachmentContentType.value = "";
+      storedAttachmentB64.value = "";
+      if (csvInput) csvInput.value = "";
+      if (txtInput) txtInput.value = "";
+      if (attachmentInput) attachmentInput.value = "";
+    }
+
+    function applyTemplatePayload(payload) {
+      subjectInput.value = payload.subject || "";
+      replyToInput.value = payload.reply_to || "";
+      sendCopyCheckbox.checked = Boolean(payload.send_copy_to_self);
+      isHtmlToggle.checked = Boolean(payload.is_html);
+      plainBody.value = payload.body || "";
+      htmlBodyEditor.innerHTML = (payload.body_html || "").trim() || encodeHtml(payload.body || "");
+      htmlSourceEditor.value = payload.body_html || htmlBodyEditor.innerHTML;
+      syncBodyFields();
+      toggleEditorMode();
+      setSourceMode(false);
+    }
+
+    function applyDraftPayload(payload, draftName) {
+      clearStoredPayloads();
+      subjectInput.value = payload.subject || "";
+      replyToInput.value = payload.reply_to || "";
+      scheduleInput.value = payload.schedule_at || "";
+      sendCopyCheckbox.checked = Boolean(payload.send_copy_to_self);
+      isHtmlToggle.checked = Boolean(payload.is_html);
+      plainBody.value = payload.body || "";
+      htmlBodyEditor.innerHTML = (payload.body_html || "").trim() || encodeHtml(payload.body || "");
+      htmlSourceEditor.value = payload.body_html || htmlBodyEditor.innerHTML;
+      const source = payload.source || "manual";
+      activateSourceTab(`${source}Box`);
+      if (source === "manual") {
+        manualEmails.value = payload.manual_emails || "";
+      } else {
+        manualEmails.value = "";
+        storedSourceKind.value = source;
+        storedSourceFilename.value = payload.source_file_name || "";
+        storedSourceB64.value = payload.source_file_b64 || "";
+      }
+      const attachment = payload.attachment || {};
+      storedAttachmentFilename.value = attachment.filename || "";
+      storedAttachmentContentType.value = attachment.content_type || "";
+      storedAttachmentB64.value = attachment.value_b64 || "";
+      toggleEditorMode();
+      setSourceMode(false);
+      const sourceLabel = source === "manual"
+        ? "lista manual"
+        : `${source.toUpperCase()} salvo em rascunho${payload.source_file_name ? `: ${payload.source_file_name}` : ""}`;
+      const attachmentLabel = attachment.filename ? ` Anexo preservado: ${attachment.filename}.` : "";
+      draftStateHint.textContent = `Rascunho "${draftName}" carregado com ${sourceLabel}.${attachmentLabel}`;
+      previewBox.textContent = source === "manual"
+        ? `Rascunho "${draftName}" carregado com lista manual pronta para revisão.`
+        : `Rascunho "${draftName}" carregado com arquivo ${payload.source_file_name || source.toUpperCase()} pronto para uso.`;
+    }
+
     saveAdminRateBtn?.addEventListener("click", async () => {
       const params = buildAdminRateParams();
       const response = await fetch("/api/admin/config", {
@@ -1279,6 +1481,58 @@ INDEX_HTML = r"""<!doctype html>
       updateAdminLogs();
     });
 
+    saveDomainPolicyBtn?.addEventListener("click", async () => {
+      const params = new URLSearchParams();
+      domainPolicyForm.querySelectorAll("input[name]").forEach((input) => params.set(input.name, input.value));
+      const response = await fetch("/api/admin/domain-policy", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        statusBox.className = "status error";
+        statusBox.textContent = payload.error || "Não foi possível salvar a regra por domínio.";
+        return;
+      }
+      statusBox.className = "status done";
+      statusBox.textContent = "Regra por domínio atualizada com sucesso.";
+      domainPolicyForm.querySelector('[name="domain"]').value = "";
+      domainPolicyForm.querySelector('[name="minimum_gap_seconds"]').value = "60";
+      domainPolicyForm.querySelector('[name="notes"]').value = "";
+      updateAdminLogs();
+    });
+
+    saveTemplateBtn?.addEventListener("click", async () => {
+      const name = window.prompt("Nome do template:");
+      if (!name) return;
+      const data = formDataWithSource();
+      data.set("template_name", name);
+      try {
+        await post("/api/template/save", data);
+        draftStateHint.textContent = `Template "${name}" salvo para este usuário.`;
+        updateLibrary();
+      } catch (error) {
+        statusBox.className = "status error";
+        statusBox.textContent = error.message;
+      }
+    });
+
+    saveDraftBtn?.addEventListener("click", async () => {
+      const name = window.prompt("Nome do rascunho:");
+      if (!name) return;
+      const data = formDataWithSource();
+      data.set("draft_name", name);
+      try {
+        await post("/api/draft/save", data);
+        draftStateHint.textContent = `Rascunho "${name}" salvo com a campanha atual.`;
+        updateLibrary();
+      } catch (error) {
+        statusBox.className = "status error";
+        statusBox.textContent = error.message;
+      }
+    });
+
     async function updateAdminLogs() {
       if (!adminPanel || adminPanel.classList.contains("hidden")) return;
       try {
@@ -1289,6 +1543,27 @@ INDEX_HTML = r"""<!doctype html>
         }
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || "Não foi possível carregar o LOG administrativo.");
+        const metrics = payload.metrics || {};
+        const summary = metrics.summary || {};
+        metricCampaigns.textContent = summary.total_campaigns || 0;
+        metricSent.textContent = summary.total_sent || 0;
+        metricFailure.textContent = `${summary.failure_rate || 0}%`;
+        metricUsers.textContent = summary.total_senders || 0;
+        adminTopSendersBox.innerHTML = (metrics.top_senders || []).length
+          ? metrics.top_senders.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.sender)}</strong><br><span class="hint">${item.sent} enviados | ${item.campaigns} campanhas | ${item.failed} falhas</span></div>`
+            ).join("")
+          : "Sem remetentes suficientes para mostrar.";
+        adminDailyVolumeBox.innerHTML = (metrics.daily_volume || []).length
+          ? metrics.daily_volume.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.day_label)}</strong><br><span class="hint">${item.sent} enviados | ${item.campaigns} campanhas</span></div>`
+            ).join("")
+          : "Sem volume recente para mostrar.";
+        adminDomainPolicyBox.innerHTML = (payload.domain_policies || []).length
+          ? payload.domain_policies.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.domain)}</strong><br><span class="hint">Espaçamento mínimo: ${item.minimum_gap_seconds}s${item.notes ? ` | ${escapeHtml(item.notes)}` : ""}${item.is_default ? " | padrão" : ""}</span><br><button type="button" class="tool-btn delete-domain-policy-btn" data-domain="${escapeHtml(item.domain)}" ${item.is_default ? "disabled" : ""}>Remover regra</button></div>`
+            ).join("")
+          : "Nenhuma regra por domínio configurada.";
         adminAccessLogBox.innerHTML = (payload.access_logs || []).length
           ? payload.access_logs.map((item) =>
               `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.email)}</strong><br>${escapeHtml(item.login_at_text || "")}<br><span class="hint">${escapeHtml(item.ip_address || "IP não identificado")}</span></div>`
@@ -1299,9 +1574,124 @@ INDEX_HTML = r"""<!doctype html>
               `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.sender)} | ${escapeHtml(item.created_at_text || "")}<br><span class="hint">${item.sent}/${item.total} enviados | ${item.failed} falhas | ${escapeHtml(item.status)}</span></div>`
             ).join("")
           : "Nenhuma campanha registrada ainda.";
+        adminAuditLogBox.innerHTML = (payload.audit_logs || []).length
+          ? payload.audit_logs.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.actor_email)}</strong><br>${escapeHtml(item.created_at_text || "")}<br><span class="hint">${escapeHtml(item.action)} em ${escapeHtml(item.target_type || "")}${item.target_id ? ` | ${escapeHtml(item.target_id)}` : ""}</span></div>`
+            ).join("")
+          : "Nenhum evento de auditoria registrado ainda.";
+        document.querySelectorAll(".delete-domain-policy-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            if (button.disabled) return;
+            const params = new URLSearchParams();
+            params.set("domain", button.dataset.domain || "");
+            const response = await fetch("/api/admin/domain-policy/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: params.toString(),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              statusBox.className = "status error";
+              statusBox.textContent = payload.error || "Não foi possível remover a regra por domínio.";
+              return;
+            }
+            statusBox.className = "status done";
+            statusBox.textContent = `Regra do domínio ${button.dataset.domain || ""} removida.`;
+            updateAdminLogs();
+          });
+        });
       } catch (error) {
         adminAccessLogBox.textContent = "Não foi possível carregar os acessos.";
         adminCampaignLogBox.textContent = "Não foi possível carregar as campanhas.";
+        adminTopSendersBox.textContent = "Não foi possível carregar as métricas.";
+        adminDailyVolumeBox.textContent = "Não foi possível carregar as métricas.";
+        adminDomainPolicyBox.textContent = "Não foi possível carregar as regras por domínio.";
+        adminAuditLogBox.textContent = "Não foi possível carregar a auditoria.";
+      }
+    }
+
+    async function updateLibrary() {
+      try {
+        const response = await fetch("/api/library");
+        if (response.status === 401) {
+          window.location.href = "/";
+          return;
+        }
+        const payload = await response.json();
+        templateListBox.innerHTML = (payload.templates || []).length
+          ? payload.templates.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.name)}</strong><br><span class="hint">${escapeHtml(item.subject || "Sem assunto")} | ${escapeHtml(item.updated_at_text || "")}</span><br><button type="button" class="tool-btn load-template-btn" data-id="${escapeHtml(item.id)}">Usar</button> <button type="button" class="tool-btn delete-template-btn" data-id="${escapeHtml(item.id)}">Excluir</button></div>`
+            ).join("")
+          : "Nenhum template salvo ainda.";
+        draftListBox.innerHTML = (payload.drafts || []).length
+          ? payload.drafts.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.name)}</strong><br><span class="hint">${escapeHtml(item.subject || "Sem assunto")} | ${escapeHtml(item.updated_at_text || "")}</span><br><button type="button" class="tool-btn load-draft-btn" data-id="${escapeHtml(item.id)}">Carregar</button> <button type="button" class="tool-btn delete-draft-btn" data-id="${escapeHtml(item.id)}">Excluir</button></div>`
+            ).join("")
+          : "Nenhum rascunho salvo ainda.";
+        document.querySelectorAll(".load-template-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const response = await fetch(`/api/template?id=${encodeURIComponent(button.dataset.id || "")}`);
+            const payload = await response.json();
+            if (!response.ok) {
+              statusBox.className = "status error";
+              statusBox.textContent = payload.error || "Não foi possível carregar o template.";
+              return;
+            }
+            applyTemplatePayload(payload);
+            draftStateHint.textContent = `Template "${payload.name}" carregado para edição.`;
+          });
+        });
+        document.querySelectorAll(".delete-template-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const params = new URLSearchParams();
+            params.set("id", button.dataset.id || "");
+            const response = await fetch("/api/template/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: params.toString(),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              statusBox.className = "status error";
+              statusBox.textContent = payload.error || "Não foi possível excluir o template.";
+              return;
+            }
+            updateLibrary();
+          });
+        });
+        document.querySelectorAll(".load-draft-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const response = await fetch(`/api/draft?id=${encodeURIComponent(button.dataset.id || "")}`);
+            const payload = await response.json();
+            if (!response.ok) {
+              statusBox.className = "status error";
+              statusBox.textContent = payload.error || "Não foi possível carregar o rascunho.";
+              return;
+            }
+            applyDraftPayload(payload.payload || {}, payload.name || "rascunho");
+          });
+        });
+        document.querySelectorAll(".delete-draft-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const params = new URLSearchParams();
+            params.set("id", button.dataset.id || "");
+            const response = await fetch("/api/draft/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: params.toString(),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              statusBox.className = "status error";
+              statusBox.textContent = payload.error || "Não foi possível excluir o rascunho.";
+              return;
+            }
+            updateLibrary();
+          });
+        });
+      } catch (error) {
+        templateListBox.textContent = "Não foi possível carregar os templates.";
+        draftListBox.textContent = "Não foi possível carregar os rascunhos.";
       }
     }
 
@@ -1617,6 +2007,400 @@ def load_rate_config() -> dict[str, int]:
     return {**defaults, **values}
 
 
+def default_domain_policy_map() -> dict[str, int]:
+    return {domain: 60 for domain in MICROSOFT_DOMAINS}
+
+
+def load_domain_policy_map() -> dict[str, int]:
+    policies = default_domain_policy_map()
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            "SELECT domain, minimum_gap_seconds FROM domain_policies ORDER BY domain ASC"
+        ).fetchall()
+    for row in rows:
+        policies[str(row["domain"]).strip().lower()] = int(row["minimum_gap_seconds"])
+    return policies
+
+
+def load_domain_policies() -> list[dict[str, Any]]:
+    defaults = default_domain_policy_map()
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            "SELECT domain, minimum_gap_seconds, notes, updated_at FROM domain_policies ORDER BY domain ASC"
+        ).fetchall()
+    persisted = {
+        str(row["domain"]).strip().lower(): {
+            "domain": str(row["domain"]).strip().lower(),
+            "minimum_gap_seconds": int(row["minimum_gap_seconds"]),
+            "notes": str(row["notes"] or ""),
+            "updated_at": row["updated_at"],
+            "updated_at_text": format_timestamp(row["updated_at"]),
+            "is_default": False,
+        }
+        for row in rows
+    }
+    for domain, gap in defaults.items():
+        persisted.setdefault(
+            domain,
+            {
+                "domain": domain,
+                "minimum_gap_seconds": gap,
+                "notes": "Padrão conservador para domínios Microsoft.",
+                "updated_at": None,
+                "updated_at_text": "",
+                "is_default": True,
+            },
+        )
+    return sorted(persisted.values(), key=lambda item: item["domain"])
+
+
+def save_domain_policy(domain: str, minimum_gap_seconds: int, notes: str = "") -> dict[str, Any]:
+    normalized = domain.strip().lower()
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO domain_policies (domain, minimum_gap_seconds, notes, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (domain) DO UPDATE SET
+                minimum_gap_seconds = EXCLUDED.minimum_gap_seconds,
+                notes = EXCLUDED.notes,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (normalized, int(minimum_gap_seconds), notes.strip(), time.time()),
+        )
+        connection.commit()
+    for item in load_domain_policies():
+        if item["domain"] == normalized:
+            return item
+    return {
+        "domain": normalized,
+        "minimum_gap_seconds": int(minimum_gap_seconds),
+        "notes": notes.strip(),
+        "updated_at": time.time(),
+        "updated_at_text": format_timestamp(time.time()),
+        "is_default": False,
+    }
+
+
+def delete_domain_policy(domain: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM domain_policies WHERE domain = %s", (domain.strip().lower(),))
+        connection.commit()
+
+
+def log_audit_event(
+    actor_email: str,
+    action: str,
+    target_type: str,
+    target_id: str = "",
+    details: dict[str, Any] | None = None,
+) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO audit_logs (actor_email, action, target_type, target_id, detail_json, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                actor_email,
+                action,
+                target_type,
+                target_id,
+                json.dumps(details or {}, ensure_ascii=False),
+                time.time(),
+            ),
+        )
+        connection.commit()
+
+
+def load_audit_logs(limit: int = 50) -> list[dict[str, Any]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT actor_email, action, target_type, target_id, detail_json, created_at
+            FROM audit_logs
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            details = json.loads(row["detail_json"] or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        items.append(
+            {
+                "actor_email": row["actor_email"],
+                "action": row["action"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"] or "",
+                "details": details,
+                "created_at": row["created_at"],
+                "created_at_text": format_timestamp(row["created_at"]),
+            }
+        )
+    return items
+
+
+def load_admin_metrics() -> dict[str, Any]:
+    with DB_LOCK, db_connect() as connection:
+        totals = connection.execute(
+            """
+            SELECT
+              COUNT(*) AS total_campaigns,
+              COUNT(DISTINCT sender) AS total_senders,
+              COALESCE(SUM(sent), 0) AS total_sent,
+              COALESCE(SUM(failed), 0) AS total_failed,
+              COUNT(*) FILTER (WHERE status = 'done') AS total_done,
+              COUNT(*) FILTER (WHERE status = 'scheduled') AS total_scheduled,
+              COUNT(*) FILTER (WHERE status IN ('running', 'paused')) AS total_running
+            FROM campaigns
+            """
+        ).fetchone()
+        top_senders = connection.execute(
+            """
+            SELECT sender, COUNT(*) AS campaigns, COALESCE(SUM(sent), 0) AS sent, COALESCE(SUM(failed), 0) AS failed
+            FROM campaigns
+            GROUP BY sender
+            ORDER BY sent DESC, campaigns DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        daily_volume = connection.execute(
+            """
+            SELECT
+              to_char(to_timestamp(created_at) AT TIME ZONE %s, 'DD/MM') AS day_label,
+              COUNT(*) AS campaigns,
+              COALESCE(SUM(sent), 0) AS sent
+            FROM campaigns
+            WHERE created_at >= %s
+            GROUP BY day_label, date_trunc('day', to_timestamp(created_at) AT TIME ZONE %s)
+            ORDER BY date_trunc('day', to_timestamp(created_at) AT TIME ZONE %s) DESC
+            LIMIT 7
+            """,
+            (APP_TIMEZONE, time.time() - (7 * 86400), APP_TIMEZONE, APP_TIMEZONE),
+        ).fetchall()
+    total_sent = int(totals["total_sent"] or 0)
+    total_failed = int(totals["total_failed"] or 0)
+    attempted = total_sent + total_failed
+    failure_rate = round((total_failed / attempted) * 100, 2) if attempted else 0.0
+    return {
+        "summary": {
+            "total_campaigns": int(totals["total_campaigns"] or 0),
+            "total_senders": int(totals["total_senders"] or 0),
+            "total_sent": total_sent,
+            "total_failed": total_failed,
+            "failure_rate": failure_rate,
+            "total_done": int(totals["total_done"] or 0),
+            "total_scheduled": int(totals["total_scheduled"] or 0),
+            "total_running": int(totals["total_running"] or 0),
+        },
+        "top_senders": [
+            {
+                "sender": row["sender"],
+                "campaigns": int(row["campaigns"] or 0),
+                "sent": int(row["sent"] or 0),
+                "failed": int(row["failed"] or 0),
+            }
+            for row in top_senders
+        ],
+        "daily_volume": [
+            {
+                "day_label": row["day_label"],
+                "campaigns": int(row["campaigns"] or 0),
+                "sent": int(row["sent"] or 0),
+            }
+            for row in reversed(daily_volume)
+        ],
+    }
+
+
+def load_admin_dashboard_data() -> dict[str, Any]:
+    payload = load_admin_logs()
+    payload["metrics"] = load_admin_metrics()
+    payload["domain_policies"] = load_domain_policies()
+    payload["audit_logs"] = load_audit_logs()
+    return payload
+
+
+def save_template(
+    sender: str,
+    name: str,
+    subject: str,
+    body: str,
+    body_html: str,
+    is_html: bool,
+    reply_to: str,
+    send_copy_to_self: bool,
+) -> dict[str, Any]:
+    template_id = str(uuid.uuid4())
+    now = time.time()
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO templates (id, sender, name, subject, body, body_html, is_html, reply_to, send_copy_to_self, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                template_id,
+                sender,
+                name.strip(),
+                subject,
+                body,
+                body_html,
+                is_html,
+                reply_to,
+                send_copy_to_self,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+    return load_template(template_id, sender) or {}
+
+
+def load_templates(sender: str) -> list[dict[str, Any]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, subject, is_html, updated_at
+            FROM templates
+            WHERE sender = %s
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """,
+            (sender,),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "subject": row["subject"],
+            "is_html": bool(row["is_html"]),
+            "updated_at": row["updated_at"],
+            "updated_at_text": format_timestamp(row["updated_at"]),
+        }
+        for row in rows
+    ]
+
+
+def load_template(template_id: str, sender: str) -> dict[str, Any] | None:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT id, name, subject, body, body_html, is_html, reply_to, send_copy_to_self, created_at, updated_at
+            FROM templates
+            WHERE id = %s AND sender = %s
+            LIMIT 1
+            """,
+            (template_id, sender),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "subject": row["subject"],
+        "body": row["body"] or "",
+        "body_html": row["body_html"] or "",
+        "is_html": bool(row["is_html"]),
+        "reply_to": row["reply_to"] or "",
+        "send_copy_to_self": bool(row["send_copy_to_self"]),
+        "created_at": row["created_at"],
+        "created_at_text": format_timestamp(row["created_at"]),
+        "updated_at": row["updated_at"],
+        "updated_at_text": format_timestamp(row["updated_at"]),
+    }
+
+
+def delete_template(template_id: str, sender: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM templates WHERE id = %s AND sender = %s", (template_id, sender))
+        connection.commit()
+
+
+def save_draft(sender: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    draft_id = str(uuid.uuid4())
+    now = time.time()
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO drafts (id, sender, name, payload_json, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (draft_id, sender, name.strip(), json.dumps(payload, ensure_ascii=False), now, now),
+        )
+        connection.commit()
+    return load_draft(draft_id, sender) or {}
+
+
+def load_drafts(sender: str) -> list[dict[str, Any]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, payload_json, updated_at
+            FROM drafts
+            WHERE sender = %s
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """,
+            (sender,),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        items.append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "subject": payload.get("subject", ""),
+                "source": payload.get("source", "manual"),
+                "updated_at": row["updated_at"],
+                "updated_at_text": format_timestamp(row["updated_at"]),
+            }
+        )
+    return items
+
+
+def load_draft(draft_id: str, sender: str) -> dict[str, Any] | None:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT id, name, payload_json, created_at, updated_at
+            FROM drafts
+            WHERE id = %s AND sender = %s
+            LIMIT 1
+            """,
+            (draft_id, sender),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "payload": payload,
+        "created_at": row["created_at"],
+        "created_at_text": format_timestamp(row["created_at"]),
+        "updated_at": row["updated_at"],
+        "updated_at_text": format_timestamp(row["updated_at"]),
+    }
+
+
+def delete_draft(draft_id: str, sender: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM drafts WHERE id = %s AND sender = %s", (draft_id, sender))
+        connection.commit()
+
+
 def load_admin_logs() -> dict[str, list[dict[str, Any]]]:
     with DB_LOCK, db_connect() as connection:
         access_rows = connection.execute(
@@ -1802,6 +2586,58 @@ def init_database() -> None:
                 login_at DOUBLE PRECISION NOT NULL,
                 ip_address TEXT,
                 user_agent TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id BIGSERIAL PRIMARY KEY,
+                actor_email TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT,
+                detail_json TEXT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS templates (
+                id TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                name TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                body_html TEXT NOT NULL,
+                is_html BOOLEAN NOT NULL,
+                reply_to TEXT NOT NULL,
+                send_copy_to_self BOOLEAN NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                updated_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drafts (
+                id TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                updated_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS domain_policies (
+                domain TEXT PRIMARY KEY,
+                minimum_gap_seconds INTEGER NOT NULL,
+                notes TEXT NOT NULL,
+                updated_at DOUBLE PRECISION NOT NULL
             )
             """
         )
@@ -2365,10 +3201,14 @@ def parse_recipients(fields: FormData) -> tuple[list[Recipient], int]:
     if source == "csv":
         file_item = fields.files.get("csv_file")
         if file_item is None or not file_item.filename:
+            file_item = load_stored_source_file(fields, "csv")
+        if file_item is None or not file_item.filename:
             raise ValueError("Selecione um arquivo CSV.")
         recipients = parse_csv_recipients(file_item.value)
     elif source == "txt":
         file_item = fields.files.get("txt_file")
+        if file_item is None or not file_item.filename:
+            file_item = load_stored_source_file(fields, "txt")
         if file_item is None or not file_item.filename:
             raise ValueError("Selecione um arquivo TXT.")
         recipients = extract_emails(file_item.value.decode("utf-8-sig", errors="replace"))
@@ -2397,10 +3237,37 @@ def field_value(fields: FormData, name: str, default: str = "") -> str:
     return str(values[0] if values[0] is not None else default)
 
 
+def decode_base64_field(value: str) -> bytes:
+    if not value.strip():
+        return b""
+    try:
+        return base64.b64decode(value.encode("ascii"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("Não foi possível recuperar um arquivo armazenado no rascunho.") from exc
+
+
+def load_stored_source_file(fields: FormData, expected_source: str) -> FormFile | None:
+    stored_source = field_value(fields, "stored_source_kind").strip().lower()
+    stored_name = field_value(fields, "stored_source_filename").strip()
+    stored_b64 = field_value(fields, "stored_source_b64").strip()
+    if stored_source != expected_source or not stored_name or not stored_b64:
+        return None
+    return FormFile(filename=stored_name, value=decode_base64_field(stored_b64))
+
+
 def attachment_from_form(fields: FormData) -> AttachmentFile | None:
     file_item = fields.files.get("attachment_file")
     if file_item is None or not file_item.filename or not file_item.value:
-        return None
+        stored_name = field_value(fields, "stored_attachment_filename").strip()
+        stored_b64 = field_value(fields, "stored_attachment_b64").strip()
+        stored_type = field_value(fields, "stored_attachment_content_type", "application/octet-stream").strip()
+        if not stored_name or not stored_b64:
+            return None
+        return AttachmentFile(
+            filename=stored_name,
+            content_type=stored_type or "application/octet-stream",
+            value=decode_base64_field(stored_b64),
+        )
     guessed_type, _ = mimetypes.guess_type(file_item.filename)
     content_type = guessed_type or "application/octet-stream"
     return AttachmentFile(
@@ -2408,6 +3275,48 @@ def attachment_from_form(fields: FormData) -> AttachmentFile | None:
         content_type=content_type,
         value=file_item.value,
     )
+
+
+def serialize_attachment(attachment: AttachmentFile | None) -> dict[str, str]:
+    if not attachment:
+        return {}
+    return {
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "value_b64": base64.b64encode(attachment.value).decode("ascii"),
+    }
+
+
+def source_payload_from_fields(fields: FormData) -> dict[str, Any]:
+    source = field_value(fields, "source", "csv").strip().lower()
+    payload: dict[str, Any] = {"source": source}
+    if source == "manual":
+        payload["manual_emails"] = field_value(fields, "manual_emails", "")
+        return payload
+    field_name = "csv_file" if source == "csv" else "txt_file"
+    file_item = fields.files.get(field_name)
+    if (file_item is None or not file_item.filename or not file_item.value) and source in {"csv", "txt"}:
+        file_item = load_stored_source_file(fields, source)
+    if file_item and file_item.filename and file_item.value:
+        payload["source_file_name"] = file_item.filename
+        payload["source_file_b64"] = base64.b64encode(file_item.value).decode("ascii")
+    return payload
+
+
+def build_draft_payload(fields: FormData) -> dict[str, Any]:
+    attachment = attachment_from_form(fields)
+    is_html = parse_bool(field_value(fields, "is_html"))
+    return {
+        **source_payload_from_fields(fields),
+        "subject": field_value(fields, "subject").strip(),
+        "body": field_value(fields, "body").strip(),
+        "body_html": field_value(fields, "body_html").strip(),
+        "is_html": is_html,
+        "reply_to": field_value(fields, "reply_to").strip(),
+        "schedule_at": field_value(fields, "schedule_at").strip(),
+        "send_copy_to_self": parse_bool(field_value(fields, "send_copy_to_self")),
+        "attachment": serialize_attachment(attachment),
+    }
 
 
 def parse_schedule(value: str) -> float | None:
@@ -2428,6 +3337,7 @@ def estimate_campaign_duration_seconds(
     batch_size: int,
     batch_pause: int,
     max_per_hour: int,
+    domain_policy_map: dict[str, int] | None = None,
 ) -> int:
     if not recipients:
         return 0
@@ -2435,6 +3345,7 @@ def estimate_campaign_duration_seconds(
     avg_delay = (delay_min + delay_max) / 2
     send_times: list[float] = []
     domain_last_sent: dict[str, float] = {}
+    policy_map = domain_policy_map or load_domain_policy_map()
     for index, recipient in enumerate(recipients, start=1):
         send_times = [item for item in send_times if current - item < 3600]
         if len(send_times) >= max_per_hour:
@@ -2442,8 +3353,9 @@ def estimate_campaign_duration_seconds(
             send_times = [item for item in send_times if current - item < 3600]
 
         domain = recipient_domain(recipient.email)
-        if domain in MICROSOFT_DOMAINS and domain in domain_last_sent:
-            current = max(current, domain_last_sent[domain] + 60)
+        minimum_gap = int(policy_map.get(domain, 0))
+        if minimum_gap and domain in domain_last_sent:
+            current = max(current, domain_last_sent[domain] + minimum_gap)
 
         send_times.append(current)
         domain_last_sent[domain] = current
@@ -2465,6 +3377,7 @@ def build_campaign_estimate(
     batch_pause: int,
     max_per_hour: int,
     start_at: float | None = None,
+    domain_policy_map: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     duration_seconds = estimate_campaign_duration_seconds(
         recipients,
@@ -2473,6 +3386,7 @@ def build_campaign_estimate(
         batch_size,
         batch_pause,
         max_per_hour,
+        domain_policy_map,
     )
     start_timestamp = start_at or time.time()
     finish_timestamp = start_timestamp + duration_seconds
@@ -2594,9 +3508,14 @@ def enforce_hourly_limit(job: MailJob, sent_times: list[float], max_per_hour: in
     return sleep_interruptibly(job, wait_for)
 
 
-def enforce_domain_spacing(job: MailJob, email_address: str, domain_times: dict[str, float]) -> bool:
+def enforce_domain_spacing(
+    job: MailJob,
+    email_address: str,
+    domain_times: dict[str, float],
+    domain_policy_map: dict[str, int],
+) -> bool:
     domain = recipient_domain(email_address)
-    minimum_gap = 60 if domain in MICROSOFT_DOMAINS else 0
+    minimum_gap = int(domain_policy_map.get(domain, 0))
     if not minimum_gap:
         return True
     last_time = domain_times.get(domain)
@@ -2929,6 +3848,7 @@ def run_job(
     domain_times: dict[str, float] = {}
     accepted_recipients: set[str] = set()
     suppression = load_suppression_list()
+    domain_policy_map = load_domain_policy_map()
     context = ssl.create_default_context()
     add_log(job, f"Conectando ao servidor {SMTP_SERVER}:{SMTP_PORT}.")
     persist_campaign(job)
@@ -2963,7 +3883,7 @@ def run_job(
 
                 if not enforce_hourly_limit(job, sent_times, max_per_hour):
                     break
-                if not enforce_domain_spacing(job, recipient.email, domain_times):
+                if not enforce_domain_spacing(job, recipient.email, domain_times, domain_policy_map):
                     break
 
                 try:
@@ -3516,6 +4436,7 @@ def report_page(request: Request, id: str) -> HTMLResponse:
     created_at = html.escape(format_timestamp(campaign.get("created_at")))
     finished_at = html.escape(format_timestamp(campaign.get("finished_at")))
     download_url = f"/api/report?id={id}"
+    log_audit_event(session["sender"], "open_report", "campaign", id, {"subject": campaign.get("subject", "")})
     rows_html = "".join(
         "<tr>"
         f"<td>{html.escape(str(row.get('timestamp', '')))}</td>"
@@ -3625,6 +4546,7 @@ async def api_admin_config_update(request: Request) -> JSONResponse:
         raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
     raw_body = (await request.body()).decode("utf-8", errors="replace")
     parsed = parse_qs(raw_body)
+    previous = load_rate_config()
     delay_min = as_int(parsed.get("delay_min", ["20"])[0], 20, 1, 3600)
     delay_max = as_int(parsed.get("delay_max", ["45"])[0], 45, 1, 3600)
     if delay_min > delay_max:
@@ -3638,6 +4560,7 @@ async def api_admin_config_update(request: Request) -> JSONResponse:
             "max_per_hour": as_int(parsed.get("max_per_hour", ["90"])[0], 90, 1, 2000),
         }
     )
+    log_audit_event(session["sender"], "update_rate_config", "app_settings", "global_rate", {"before": previous, "after": config})
     return JSONResponse({"ok": True, "rate_config": config})
 
 
@@ -3646,7 +4569,136 @@ def api_admin_logs(request: Request) -> JSONResponse:
     session = require_request_session(request)
     if not is_admin_email(session["sender"]):
         raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
-    return JSONResponse(load_admin_logs())
+    return JSONResponse(load_admin_dashboard_data())
+
+
+@app.post("/api/admin/domain-policy")
+async def api_admin_domain_policy(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    if not is_admin_email(session["sender"]):
+        raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    domain = str(parsed.get("domain", [""])[0]).strip().lower()
+    if not EMAIL_RE.match(f"teste@{domain}") if domain else True:
+        raise HTTPException(status_code=400, detail="Informe um domínio válido, como outlook.com.")
+    minimum_gap_seconds = as_int(parsed.get("minimum_gap_seconds", ["60"])[0], 60, 0, 3600)
+    notes = str(parsed.get("notes", [""])[0]).strip()
+    policy = save_domain_policy(domain, minimum_gap_seconds, notes)
+    log_audit_event(
+        session["sender"],
+        "save_domain_policy",
+        "domain_policy",
+        domain,
+        {"minimum_gap_seconds": minimum_gap_seconds, "notes": notes},
+    )
+    return JSONResponse({"ok": True, "policy": policy, "domain_policies": load_domain_policies()})
+
+
+@app.post("/api/admin/domain-policy/delete")
+async def api_admin_domain_policy_delete(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    if not is_admin_email(session["sender"]):
+        raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    domain = str(parsed.get("domain", [""])[0]).strip().lower()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Informe o domínio a remover.")
+    delete_domain_policy(domain)
+    log_audit_event(session["sender"], "delete_domain_policy", "domain_policy", domain, {})
+    return JSONResponse({"ok": True, "domain_policies": load_domain_policies()})
+
+
+@app.get("/api/library")
+def api_library(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    return JSONResponse(
+        {
+            "templates": load_templates(session["sender"]),
+            "drafts": load_drafts(session["sender"]),
+        }
+    )
+
+
+@app.get("/api/template")
+def api_template(request: Request, id: str) -> JSONResponse:
+    session = require_request_session(request)
+    template = load_template(id, session["sender"])
+    if not template:
+        raise HTTPException(status_code=404, detail="Template não encontrado.")
+    log_audit_event(session["sender"], "load_template", "template", id, {"name": template["name"]})
+    return JSONResponse(template)
+
+
+@app.post("/api/template/save")
+async def api_template_save(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    fields = await request_formdata(request)
+    name = field_value(fields, "template_name").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Informe um nome para o template.")
+    is_html = parse_bool(field_value(fields, "is_html"))
+    template = save_template(
+        session["sender"],
+        name,
+        field_value(fields, "subject").strip(),
+        field_value(fields, "body").strip(),
+        field_value(fields, "body_html").strip(),
+        is_html,
+        field_value(fields, "reply_to").strip(),
+        parse_bool(field_value(fields, "send_copy_to_self")),
+    )
+    log_audit_event(session["sender"], "save_template", "template", template.get("id", ""), {"name": name})
+    return JSONResponse({"ok": True, "template": template, "templates": load_templates(session["sender"])})
+
+
+@app.post("/api/template/delete")
+async def api_template_delete(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    template_id = str(parsed.get("id", [""])[0]).strip()
+    if not template_id:
+        raise HTTPException(status_code=400, detail="Informe o template a excluir.")
+    delete_template(template_id, session["sender"])
+    log_audit_event(session["sender"], "delete_template", "template", template_id, {})
+    return JSONResponse({"ok": True, "templates": load_templates(session["sender"])})
+
+
+@app.get("/api/draft")
+def api_draft(request: Request, id: str) -> JSONResponse:
+    session = require_request_session(request)
+    draft = load_draft(id, session["sender"])
+    if not draft:
+        raise HTTPException(status_code=404, detail="Rascunho não encontrado.")
+    log_audit_event(session["sender"], "load_draft", "draft", id, {"name": draft["name"]})
+    return JSONResponse(draft)
+
+
+@app.post("/api/draft/save")
+async def api_draft_save(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    fields = await request_formdata(request)
+    name = field_value(fields, "draft_name").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Informe um nome para o rascunho.")
+    draft = save_draft(session["sender"], name, build_draft_payload(fields))
+    log_audit_event(session["sender"], "save_draft", "draft", draft.get("id", ""), {"name": name})
+    return JSONResponse({"ok": True, "draft": draft, "drafts": load_drafts(session["sender"])})
+
+
+@app.post("/api/draft/delete")
+async def api_draft_delete(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    parsed = parse_qs(raw_body)
+    draft_id = str(parsed.get("id", [""])[0]).strip()
+    if not draft_id:
+        raise HTTPException(status_code=400, detail="Informe o rascunho a excluir.")
+    delete_draft(draft_id, session["sender"])
+    log_audit_event(session["sender"], "delete_draft", "draft", draft_id, {})
+    return JSONResponse({"ok": True, "drafts": load_drafts(session["sender"])})
 
 
 @app.get("/api/status")
@@ -3677,6 +4729,7 @@ def api_report(request: Request, id: str) -> FastAPIResponse:
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
     filename = f"relatorio-{safe_filename_part(str(campaign.get('subject', 'campanha')))}.csv"
+    log_audit_event(session["sender"], "download_report", "campaign", id, {"subject": campaign.get("subject", ""), "filename": filename})
     return FastAPIResponse(
         content=report_path.read_bytes(),
         media_type="text/csv; charset=utf-8",
@@ -3693,6 +4746,7 @@ def api_retry_source(request: Request, id: str) -> JSONResponse:
     recipients = load_failed_recipients_from_report(id)
     if not recipients:
         raise HTTPException(status_code=404, detail="Essa campanha não tem e-mails com falha para retry.")
+    log_audit_event(session["sender"], "prepare_retry", "campaign", id, {"recipients": len(recipients)})
     return JSONResponse({"campaign_id": id, "recipients": recipients})
 
 
@@ -3712,6 +4766,7 @@ async def api_login(request: Request) -> JSONResponse:
     client_ip = request.client.host if request.client else ""
     user_agent = request.headers.get("user-agent", "")
     log_user_access(sender, client_ip, user_agent)
+    log_audit_event(sender, "login", "session", "", {"ip_address": client_ip, "user_agent": user_agent})
     session_id = create_session(sender, password)
     response = JSONResponse({"ok": True, "sender": sender})
     response.set_cookie("md_session", session_id, httponly=True, samesite="lax", path="/")
@@ -3733,6 +4788,7 @@ async def api_preview(request: Request) -> JSONResponse:
     fields = await request_formdata(request)
     recipients, invalid = parse_recipients(fields)
     rate_config = load_rate_config()
+    domain_policy_map = load_domain_policy_map()
     scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
     estimate = build_campaign_estimate(
         recipients,
@@ -3742,6 +4798,7 @@ async def api_preview(request: Request) -> JSONResponse:
         rate_config["batch_pause"],
         rate_config["max_per_hour"],
         start_at=scheduled_for or time.time(),
+        domain_policy_map=domain_policy_map,
     )
     return JSONResponse(
         {
@@ -3787,6 +4844,7 @@ async def api_start(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Informe assunto e corpo da mensagem.")
 
     rate_config = load_rate_config()
+    domain_policy_map = load_domain_policy_map()
     delay_min = rate_config["delay_min"]
     delay_max = rate_config["delay_max"]
     batch_size = rate_config["batch_size"]
@@ -3816,6 +4874,7 @@ async def api_start(request: Request) -> JSONResponse:
         batch_pause,
         max_per_hour,
         start_at=scheduled_for or time.time(),
+        domain_policy_map=domain_policy_map,
     )
     job.estimated_duration_seconds = int(estimate["duration_seconds"])
     job.estimated_end_at = float(estimate["finish_at"])
@@ -3868,6 +4927,13 @@ async def api_start(request: Request) -> JSONResponse:
             ),
             password,
         )
+    log_audit_event(
+        sender,
+        "start_campaign",
+        "campaign",
+        job.id,
+        {"subject": subject, "total": len(recipients), "scheduled_for": scheduled_for, "invalid_ignored": invalid},
+    )
     thread.start()
     return JSONResponse({"ok": True, "job_id": job.id, "job": job_snapshot(sender)})
 
@@ -3886,6 +4952,7 @@ def api_pause(request: Request) -> JSONResponse:
     if should_log and job:
         add_log(job, "Pausa solicitada pelo usuário.")
         persist_campaign(job)
+        log_audit_event(session["sender"], "pause_campaign", "campaign", job.id, {"subject": job.subject})
     return JSONResponse(job_snapshot(session["sender"]))
 
 
@@ -3902,6 +4969,7 @@ def api_resume(request: Request) -> JSONResponse:
     if should_log and job:
         add_log(job, "Envio retomado pelo usuário.")
         persist_campaign(job)
+        log_audit_event(session["sender"], "resume_campaign", "campaign", job.id, {"subject": job.subject})
     return JSONResponse(job_snapshot(session["sender"]))
 
 
@@ -3920,6 +4988,7 @@ def api_cancel(request: Request, id: str = "") -> JSONResponse:
         raise HTTPException(status_code=403, detail="Essa campanha não pertence ao usuário autenticado.")
     if not cancel_campaign_by_id(campaign_id):
         raise HTTPException(status_code=400, detail="Não foi possível cancelar a campanha informada.")
+    log_audit_event(session["sender"], "cancel_campaign", "campaign", campaign_id, {})
     return JSONResponse(
         {
             "ok": True,
