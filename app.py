@@ -878,8 +878,8 @@ INDEX_HTML = r"""<!doctype html>
             </label>
           </div>
           <div id="htmlEditorBox" class="hidden">
-            <label>
-              Corpo em HTML
+            <div>
+              <span>Corpo em HTML</span>
               <div class="editor-shell">
                 <div class="editor-toolbar">
                   <div class="toolbar-row">
@@ -928,7 +928,7 @@ INDEX_HTML = r"""<!doctype html>
                 <div id="htmlBodyEditor" class="html-editor" contenteditable="true">Olá {{nome}},<br><br>Digite aqui a mensagem da mala direta.</div>
                 <textarea id="htmlSourceEditor" class="html-source hidden" spellcheck="false"></textarea>
               </div>
-            </label>
+            </div>
             <textarea name="body_html" id="htmlBodyValue" class="hidden"></textarea>
             <div class="hint">Use a barra para aplicar estilos, alinhamento, cores, links, imagens e alternar entre visualização visual e HTML. As variáveis como {{nome}} continuam funcionando.</div>
           </div>
