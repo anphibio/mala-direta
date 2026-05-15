@@ -424,6 +424,27 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0 0 12px;
       font-size: 15px;
     }
+    .admin-log-box {
+      height: 292px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scroll-behavior: smooth;
+    }
+    .admin-log-box::-webkit-scrollbar {
+      width: 10px;
+    }
+    .admin-log-box::-webkit-scrollbar-track {
+      background: #eef2f6;
+      border-radius: 999px;
+    }
+    .admin-log-box::-webkit-scrollbar-thumb {
+      background: #c2ccda;
+      border-radius: 999px;
+      border: 2px solid #eef2f6;
+    }
+    .admin-log-box::-webkit-scrollbar-thumb:hover {
+      background: #9fb0c6;
+    }
     main {
       max-width: 1220px;
       margin: 0 auto;
@@ -985,11 +1006,11 @@ INDEX_HTML = r"""<!doctype html>
               <div class="grid">
                 <div>
                   <div class="hint">Acessos recentes</div>
-                  <div class="preview" id="adminAccessLogBox">Carregando acessos...</div>
+                  <div class="preview admin-log-box" id="adminAccessLogBox">Carregando acessos...</div>
                 </div>
                 <div>
                   <div class="hint">Campanhas e quantitativo enviado</div>
-                  <div class="preview" id="adminCampaignLogBox">Carregando campanhas...</div>
+                  <div class="preview admin-log-box" id="adminCampaignLogBox">Carregando campanhas...</div>
                 </div>
               </div>
             </div>
