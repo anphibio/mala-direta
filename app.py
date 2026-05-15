@@ -1055,6 +1055,7 @@ INDEX_HTML = r"""<!doctype html>
     const resumeBtn = document.querySelector("#resumeBtn");
     const cancelBtn = document.querySelector("#cancelBtn");
     const reportBtn = document.querySelector("#reportBtn");
+    const startBtn = form.querySelector('button[type="submit"]');
     const historyBox = document.querySelector("#historyBox");
     const suppressionInfo = document.querySelector("#suppressionInfo");
     const activeCampaignsBox = document.querySelector("#activeCampaignsBox");
@@ -1420,6 +1421,7 @@ INDEX_HTML = r"""<!doctype html>
       cancelBtn.disabled = !["running", "paused", "scheduled"].includes(job.status);
       reportBtn.disabled = !job.report_url;
       reportBtn.dataset.url = job.report_url || "";
+      startBtn.disabled = ["running", "paused", "scheduled"].includes(job.status);
       statusBox.className = "status";
       if (job.status === "done") statusBox.classList.add("done");
       if (job.status === "failed" || job.status === "cancelled") statusBox.classList.add("error");
@@ -1993,6 +1995,21 @@ def has_active_campaign() -> bool:
     with DB_LOCK, db_connect() as connection:
         row = connection.execute(
             "SELECT id FROM campaigns WHERE status IN ('running', 'paused', 'scheduled') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row is not None
+
+
+def has_active_campaign_for_sender(sender: str) -> bool:
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT id
+            FROM campaigns
+            WHERE sender = %s AND status IN ('running', 'paused', 'scheduled')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (sender,),
         ).fetchone()
     return row is not None
 
@@ -3719,6 +3736,13 @@ async def api_preview(request: Request) -> JSONResponse:
 async def api_start(request: Request) -> JSONResponse:
     global CURRENT_JOB
     session = require_request_session(request)
+    sender = session["sender"]
+
+    if has_active_campaign_for_sender(sender):
+        raise HTTPException(
+            status_code=400,
+            detail="Você já tem uma campanha em andamento ou agendada neste perfil. Aguarde terminar ou cancele a atual antes de criar outra.",
+        )
 
     with JOB_LOCK:
         if CURRENT_JOB and CURRENT_JOB.status in {"running", "paused", "scheduled"}:
@@ -3727,7 +3751,6 @@ async def api_start(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Já existe uma campanha ativa ou agendada. Conclua ou cancele antes de criar outra.")
 
     fields = await request_formdata(request)
-    sender = session["sender"]
     password = session["password"]
     recipients, invalid = parse_recipients(fields)
     if not recipients:
