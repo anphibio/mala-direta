@@ -980,6 +980,19 @@ INDEX_HTML = r"""<!doctype html>
               <button type="button" id="saveAdminRateBtn">Salvar ritmo global</button>
               <span class="hint">Essas configurações passam a valer para todos os usuários e novas campanhas.</span>
             </div>
+            <div style="margin-top:16px;">
+              <p class="panel-title">LOG administrativo</p>
+              <div class="grid">
+                <div>
+                  <div class="hint">Acessos recentes</div>
+                  <div class="preview" id="adminAccessLogBox">Carregando acessos...</div>
+                </div>
+                <div>
+                  <div class="hint">Campanhas e quantitativo enviado</div>
+                  <div class="preview" id="adminCampaignLogBox">Carregando campanhas...</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1027,6 +1040,8 @@ INDEX_HTML = r"""<!doctype html>
     const adminPanel = document.querySelector("#adminPanel");
     const adminRateForm = document.querySelector("#adminRateForm");
     const saveAdminRateBtn = document.querySelector("#saveAdminRateBtn");
+    const adminAccessLogBox = document.querySelector("#adminAccessLogBox");
+    const adminCampaignLogBox = document.querySelector("#adminCampaignLogBox");
     const previewBox = document.querySelector("#previewBox");
     const statusBox = document.querySelector("#statusBox");
     const logBox = document.querySelector("#logBox");
@@ -1073,6 +1088,9 @@ INDEX_HTML = r"""<!doctype html>
       globalRateConfig = payload.rate_config || null;
       applyRateConfig(globalRateConfig);
       adminPanel.classList.toggle("hidden", !payload.is_admin);
+      if (payload.is_admin) {
+        updateAdminLogs();
+      }
     }
 
     function applyRateConfig(config) {
@@ -1236,7 +1254,34 @@ INDEX_HTML = r"""<!doctype html>
       applyRateConfig(payload.rate_config || null);
       statusBox.className = "status done";
       statusBox.textContent = "Ritmo global atualizado com sucesso.";
+      updateAdminLogs();
     });
+
+    async function updateAdminLogs() {
+      if (!adminPanel || adminPanel.classList.contains("hidden")) return;
+      try {
+        const response = await fetch("/api/admin/logs");
+        if (response.status === 401) {
+          window.location.href = "/";
+          return;
+        }
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Não foi possível carregar o LOG administrativo.");
+        adminAccessLogBox.innerHTML = (payload.access_logs || []).length
+          ? payload.access_logs.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.email)}</strong><br>${escapeHtml(item.login_at_text || "")}<br><span class="hint">${escapeHtml(item.ip_address || "IP não identificado")}</span></div>`
+            ).join("")
+          : "Nenhum acesso registrado ainda.";
+        adminCampaignLogBox.innerHTML = (payload.campaign_logs || []).length
+          ? payload.campaign_logs.map((item) =>
+              `<div style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(item.subject)}</strong><br>${escapeHtml(item.sender)} | ${escapeHtml(item.created_at_text || "")}<br><span class="hint">${item.sent}/${item.total} enviados | ${item.failed} falhas | ${escapeHtml(item.status)}</span></div>`
+            ).join("")
+          : "Nenhuma campanha registrada ainda.";
+      } catch (error) {
+        adminAccessLogBox.textContent = "Não foi possível carregar os acessos.";
+        adminCampaignLogBox.textContent = "Não foi possível carregar as campanhas.";
+      }
+    }
 
     logoutBtn.addEventListener("click", async () => {
       await fetch("/api/logout", { method: "POST" });
@@ -1512,6 +1557,18 @@ def upsert_user(email_address: str) -> None:
         connection.commit()
 
 
+def log_user_access(email_address: str, ip_address: str, user_agent: str) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO access_logs (email, login_at, ip_address, user_agent)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (email_address, time.time(), ip_address, user_agent),
+        )
+        connection.commit()
+
+
 def is_admin_email(email_address: str) -> bool:
     return email_address.strip().lower() in ADMIN_EMAILS
 
@@ -1535,6 +1592,51 @@ def load_rate_config() -> dict[str, int]:
         ).fetchall()
     values = {row["key"]: int(row["value"]) for row in rows}
     return {**defaults, **values}
+
+
+def load_admin_logs() -> dict[str, list[dict[str, Any]]]:
+    with DB_LOCK, db_connect() as connection:
+        access_rows = connection.execute(
+            """
+            SELECT email, login_at, ip_address, user_agent
+            FROM access_logs
+            ORDER BY login_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        campaign_rows = connection.execute(
+            """
+            SELECT sender, subject, status, total, sent, failed, created_at
+            FROM campaigns
+            ORDER BY created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    return {
+        "access_logs": [
+            {
+                "email": row["email"],
+                "login_at": row["login_at"],
+                "login_at_text": format_timestamp(row["login_at"]),
+                "ip_address": row["ip_address"] or "",
+                "user_agent": row["user_agent"] or "",
+            }
+            for row in access_rows
+        ],
+        "campaign_logs": [
+            {
+                "sender": row["sender"],
+                "subject": row["subject"],
+                "status": row["status"],
+                "total": row["total"],
+                "sent": row["sent"],
+                "failed": row["failed"],
+                "created_at": row["created_at"],
+                "created_at_text": format_timestamp(row["created_at"]),
+            }
+            for row in campaign_rows
+        ],
+    }
 
 
 def save_rate_config(config: dict[str, int]) -> dict[str, int]:
@@ -1666,6 +1768,17 @@ def init_database() -> None:
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS access_logs (
+                id BIGSERIAL PRIMARY KEY,
+                email TEXT NOT NULL,
+                login_at DOUBLE PRECISION NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT
             )
             """
         )
@@ -3490,6 +3603,14 @@ async def api_admin_config_update(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "rate_config": config})
 
 
+@app.get("/api/admin/logs")
+def api_admin_logs(request: Request) -> JSONResponse:
+    session = require_request_session(request)
+    if not is_admin_email(session["sender"]):
+        raise HTTPException(status_code=403, detail="Acesso restrito à área administrativa.")
+    return JSONResponse(load_admin_logs())
+
+
 @app.get("/api/status")
 def api_status(request: Request) -> JSONResponse:
     session = require_request_session(request)
@@ -3550,6 +3671,9 @@ async def api_login(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=friendly_send_error(exc)) from exc
     upsert_user(sender)
+    client_ip = request.client.host if request.client else ""
+    user_agent = request.headers.get("user-agent", "")
+    log_user_access(sender, client_ip, user_agent)
     session_id = create_session(sender, password)
     response = JSONResponse({"ok": True, "sender": sender})
     response.set_cookie("md_session", session_id, httponly=True, samesite="lax", path="/")
