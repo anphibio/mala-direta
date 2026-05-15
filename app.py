@@ -108,6 +108,8 @@ class MailJob:
     finished_at: float | None = None
     next_send_at: float | None = None
     scheduled_for: float | None = None
+    estimated_duration_seconds: int = 0
+    estimated_end_at: float | None = None
     report_path: str | None = None
     logs: list[dict[str, Any]] = field(default_factory=list)
     report_rows: list[dict[str, str]] = field(default_factory=list)
@@ -746,6 +748,7 @@ INDEX_HTML = r"""<!doctype html>
     <aside>
       <div id="statusBox" class="status">Pronto para configurar a campanha.</div>
       <div class="progress"><div id="progressBar"></div></div>
+      <div class="preview" id="estimateBox">Previsão de término indisponível até validar a lista.</div>
       <div class="stats">
         <div class="stat"><strong id="totalStat">0</strong><span>Total</span></div>
         <div class="stat"><strong id="sentStat">0</strong><span>Enviados</span></div>
@@ -775,6 +778,7 @@ INDEX_HTML = r"""<!doctype html>
     const statusBox = document.querySelector("#statusBox");
     const logBox = document.querySelector("#logBox");
     const progressBar = document.querySelector("#progressBar");
+    const estimateBox = document.querySelector("#estimateBox");
     const totalStat = document.querySelector("#totalStat");
     const sentStat = document.querySelector("#sentStat");
     const failStat = document.querySelector("#failStat");
@@ -925,8 +929,10 @@ INDEX_HTML = r"""<!doctype html>
       try {
         const payload = await post("/api/preview", formDataWithSource());
         previewBox.innerHTML = `<strong>${payload.valid}</strong> e-mails válidos, <strong>${payload.invalid}</strong> inválidos/duplicados. Amostra: ${payload.sample.map(escapeHtml).join(", ") || "sem amostra"}.`;
+        renderEstimate(payload.estimate);
       } catch (error) {
         previewBox.textContent = error.message;
+        estimateBox.textContent = "Previsão de término indisponível.";
       }
     });
 
@@ -1011,6 +1017,7 @@ INDEX_HTML = r"""<!doctype html>
               previewBox.innerHTML = `<strong>${payload.recipients.length}</strong> e-mails com falha carregados para retry. Você pode editar os endereços antes de reenviar.`;
               statusBox.className = "status";
               statusBox.textContent = `Retry preparado com base na campanha "${button.dataset.subject || "anterior"}".`;
+              estimateBox.textContent = "Revise a lista e clique em Pré-validar lista para recalcular a previsão.";
               manualEmails.focus();
               manualEmails.scrollIntoView({ behavior: "smooth", block: "center" });
             } catch (error) {
@@ -1046,6 +1053,7 @@ INDEX_HTML = r"""<!doctype html>
       if (job.status === "failed" || job.status === "cancelled") statusBox.classList.add("error");
       if (job.status === "paused") statusBox.classList.add("paused");
       statusBox.textContent = statusText(job);
+      renderEstimate(job.estimate || null);
       logBox.innerHTML = (job.logs || []).map((entry) => {
         return `<div>[${escapeHtml(entry.time)}] ${escapeHtml(entry.message)}</div>`;
       }).join("") || "Aguardando envio...";
@@ -1062,6 +1070,17 @@ INDEX_HTML = r"""<!doctype html>
       if (job.status === "scheduled") return `Campanha agendada para ${job.scheduled_for_text || "horário informado"}.`;
       if (job.next_send_in && job.next_send_in > 0) return `Enviando com controle de ritmo. Próximo envio em ${job.next_send_in}s.`;
       return job.current ? `Processando ${job.current}` : "Envio em andamento.";
+    }
+
+    function renderEstimate(estimate) {
+      if (!estimate || !estimate.finish_text) {
+        estimateBox.textContent = "Previsão de término indisponível até validar a lista.";
+        return;
+      }
+      const duration = escapeHtml(estimate.duration_text || "");
+      const finish = escapeHtml(estimate.finish_text || "");
+      const basis = escapeHtml(estimate.start_text || "");
+      estimateBox.innerHTML = `<strong>Previsão de término:</strong> ${finish}<br><span class="hint">Duração estimada: ${duration}${basis ? ` | Início considerado: ${basis}` : ""}</span>`;
     }
 
     function escapeHtml(text) {
@@ -1088,6 +1107,19 @@ def format_timestamp(timestamp: float | None) -> str:
     if not timestamp:
         return ""
     return datetime.fromtimestamp(timestamp, APP_TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def format_duration(seconds: int) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}min")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 def read_json_file(path: Path, default: Any) -> Any:
@@ -1428,6 +1460,14 @@ def campaign_summary(job: MailJob) -> dict[str, Any]:
         "scheduled_for_text": format_timestamp(job.scheduled_for),
         "finished_at": job.finished_at,
         "finished_at_text": format_timestamp(job.finished_at),
+        "estimate": {
+            "duration_seconds": job.estimated_duration_seconds,
+            "duration_text": format_duration(job.estimated_duration_seconds),
+            "finish_at": job.estimated_end_at,
+            "finish_text": format_timestamp(job.estimated_end_at),
+        }
+        if job.estimated_end_at
+        else None,
         "report_url": f"/api/report?id={job.id}" if job.report_path else "",
     }
 
@@ -1645,6 +1685,71 @@ def parse_schedule(value: str) -> float | None:
         return local_dt.timestamp()
     except ValueError as exc:
         raise ValueError("A data de agendamento está inválida.") from exc
+
+
+def estimate_campaign_duration_seconds(
+    recipients: list[Recipient],
+    delay_min: int,
+    delay_max: int,
+    batch_size: int,
+    batch_pause: int,
+    max_per_hour: int,
+) -> int:
+    if not recipients:
+        return 0
+    current = 0.0
+    avg_delay = (delay_min + delay_max) / 2
+    send_times: list[float] = []
+    domain_last_sent: dict[str, float] = {}
+    for index, recipient in enumerate(recipients, start=1):
+        send_times = [item for item in send_times if current - item < 3600]
+        if len(send_times) >= max_per_hour:
+            current = max(current, send_times[0] + 3601)
+            send_times = [item for item in send_times if current - item < 3600]
+
+        domain = recipient_domain(recipient.email)
+        if domain in MICROSOFT_DOMAINS and domain in domain_last_sent:
+            current = max(current, domain_last_sent[domain] + 60)
+
+        send_times.append(current)
+        domain_last_sent[domain] = current
+
+        if index < len(recipients):
+            if batch_size and index % batch_size == 0 and batch_pause:
+                current += batch_pause
+            else:
+                current += avg_delay
+
+    return int(round(current))
+
+
+def build_campaign_estimate(
+    recipients: list[Recipient],
+    delay_min: int,
+    delay_max: int,
+    batch_size: int,
+    batch_pause: int,
+    max_per_hour: int,
+    start_at: float | None = None,
+) -> dict[str, Any]:
+    duration_seconds = estimate_campaign_duration_seconds(
+        recipients,
+        delay_min,
+        delay_max,
+        batch_size,
+        batch_pause,
+        max_per_hour,
+    )
+    start_timestamp = start_at or time.time()
+    finish_timestamp = start_timestamp + duration_seconds
+    return {
+        "duration_seconds": duration_seconds,
+        "duration_text": format_duration(duration_seconds),
+        "start_at": start_timestamp,
+        "start_text": format_timestamp(start_timestamp),
+        "finish_at": finish_timestamp,
+        "finish_text": format_timestamp(finish_timestamp),
+    }
 
 
 def render_template(text: str, recipient: Recipient, sender: str) -> str:
@@ -1952,6 +2057,8 @@ def restore_scheduled_campaigns() -> None:
         started_at=float(pending["created_at"]),
         finished_at=pending["finished_at"],
         scheduled_for=pending["scheduled_for"],
+        estimated_duration_seconds=0,
+        estimated_end_at=pending["scheduled_for"],
         report_path=pending["report_path"] or None,
     )
     with JOB_LOCK:
@@ -2172,6 +2279,16 @@ def job_snapshot() -> dict[str, Any]:
                 "current": job.current,
                 "next_send_in": next_send_in,
                 "scheduled_for_text": format_timestamp(job.scheduled_for),
+                "estimate": {
+                    "duration_seconds": job.estimated_duration_seconds,
+                    "duration_text": format_duration(job.estimated_duration_seconds),
+                    "start_at": job.scheduled_for or job.created_at,
+                    "start_text": format_timestamp(job.scheduled_for or job.created_at),
+                    "finish_at": job.estimated_end_at,
+                    "finish_text": format_timestamp(job.estimated_end_at),
+                }
+                if job.estimated_end_at
+                else None,
                 "report_url": f"/api/report?id={job.id}" if job.report_path else "",
                 "suppression_count": suppression_count(),
                 "logs": list(job.logs),
@@ -2190,6 +2307,7 @@ def job_snapshot() -> dict[str, Any]:
             "current": "",
             "next_send_in": 0,
             "scheduled_for_text": active_item["scheduled_for_text"],
+            "estimate": active_item.get("estimate"),
             "report_url": active_item["report_url"],
             "suppression_count": suppression_count(),
             "logs": [
@@ -2270,11 +2388,29 @@ class MailerHandler(BaseHTTPRequestHandler):
     def handle_preview(self) -> None:
         fields = self.read_form()
         recipients, invalid = parse_recipients(fields)
+        delay_min = as_int(field_value(fields, "delay_min"), 20, 1, 3600)
+        delay_max = as_int(field_value(fields, "delay_max"), 45, 1, 3600)
+        if delay_min > delay_max:
+            delay_min, delay_max = delay_max, delay_min
+        batch_size = as_int(field_value(fields, "batch_size"), 25, 0, 500)
+        batch_pause = as_int(field_value(fields, "batch_pause"), 300, 0, 7200)
+        max_per_hour = as_int(field_value(fields, "max_per_hour"), 90, 1, 2000)
+        scheduled_for = parse_schedule(field_value(fields, "schedule_at"))
+        estimate = build_campaign_estimate(
+            recipients,
+            delay_min,
+            delay_max,
+            batch_size,
+            batch_pause,
+            max_per_hour,
+            start_at=scheduled_for or time.time(),
+        )
         self.send_json(
             {
                 "valid": len(recipients),
                 "invalid": invalid,
                 "sample": [recipient.email for recipient in recipients[:8]],
+                "estimate": estimate,
             }
         )
 
@@ -2327,6 +2463,17 @@ class MailerHandler(BaseHTTPRequestHandler):
             skipped=invalid,
             scheduled_for=scheduled_for,
         )
+        estimate = build_campaign_estimate(
+            recipients,
+            delay_min,
+            delay_max,
+            batch_size,
+            batch_pause,
+            max_per_hour,
+            start_at=scheduled_for or time.time(),
+        )
+        job.estimated_duration_seconds = int(estimate["duration_seconds"])
+        job.estimated_end_at = float(estimate["finish_at"])
         with JOB_LOCK:
             CURRENT_JOB = job
         add_log(
